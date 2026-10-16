@@ -1,0 +1,23 @@
+# Personal PDFs, highlights, exports, and machine configuration
+/data/
+/exports/
+/local-config.json
+/LOCAL_NOTES.md
+/.local/
+.env
+.env.*
+!.env.example
+
+# Development dependencies and generated files
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+/vendor/
+/tmp/
+/test-results/
+*.pdf
+!/examples/reader-demo.pdf

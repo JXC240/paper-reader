@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Paper Reader · 论文伴读</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='12' fill='%231f6159'/%3E%3Cpath d='M12 12h14c6 0 10 2 10 6v20c-3-3-7-4-12-4H12z' fill='%23fff8e8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css">
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="Paper Reader 首页"><span class="brand-icon" aria-hidden="true">▤</span><span>Paper Reader<small>论文伴读 · 本机工作空间</small></span></a>
+    <div class="header-actions">
+      <span id="save-status" class="save-status" role="status">正在连接…</span>
+      <button id="help-toggle" class="quiet" aria-label="使用说明">?</button>
+      <button id="open-file" class="primary">打开 PDF</button>
+      <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+    </div>
+  </header>
+
+  <section id="help" class="help-panel" hidden>
+    <strong>在右边阅读，在聊天里理解。</strong>
+    <p>打开 PDF → 选中文字标黄 → 回到聊天说“讲一下刚标黄的句子”。高亮会保存在本机。助手可读取项目下的 <code>data/current-reading.json</code>，也可以使用“复制阅读卡点”。</p>
+    <p>高亮默认表示整句理解卡点；只有点击“收为生词”才会进入导出笔记的生词分类。原 PDF 已有批注会显示并保留，列表记录本工具新增的高亮。导出的 Markdown 可在 Obsidian 中打开。扫描页暂不支持自动识字，双栏和公式请结合原文核对。</p>
+    <p>缩放框可输入 25%—400% 的比例，按回车确认；也可用 − / + 按钮。⌘ / Ctrl 加 + 或 − 缩放，⌘ / Ctrl 加 0 适合宽度（需阅读页面获得焦点）。取消选文、点空白、滚动或按 Esc 可收起选文菜单。</p>
+    <p>先选“高亮／下划线／删除线”和颜色，再拖选文字。连续标记开启时自动保存，选文模式则需点击“标记这段”。已有标注可在右侧卡片中换颜色或样式；删除线只画线，不会删除PDF原文。</p>
+    <p>“搜索”可查找整篇论文的文字（⌘ / Ctrl F），点击结果回到原文；搜索框内 Enter / Shift Enter 切换结果。搜索框只是临时提示，不会新增标注。“导航”提供 PDF 自带目录与页面书签；☆ 可收藏当前页。页码、比例和页内阅读位置会保存在本机。</p>
+  </section>
+
+  <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="retry-save" hidden>重试保存</button><button id="dismiss-error" aria-label="关闭错误提示">×</button></div>
+
+  <main class="app-main">
+    <section id="empty-state" class="empty-state" hidden>
+      <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">READ AT YOUR OWN PACE</p>
+      <h1>把没读懂的地方，<br>留给下一次对话。</h1>
+      <p>选中就标黄，关闭后也保留。<br>带着原文和页码，一句一句读下去。</p>
+      <div class="empty-actions"><button id="empty-open" class="primary">打开我的论文</button><button id="open-demo">试试示例 PDF</button></div>
+      <div id="recent-documents" class="recent-documents"></div>
+    </section>
+
+    <section id="workspace" class="workspace" hidden>
+      <div class="document-bar"><div class="document-title"><span class="eyebrow">正在阅读</span><h1 id="document-name"></h1></div><select id="document-picker" aria-label="切换论文"></select></div>
+      <div class="toolbar" role="toolbar" aria-label="PDF 阅读工具">
+        <div class="tool-group pagination"><button id="previous-page" aria-label="上一页">‹</button><label><input id="page-number" type="number" min="1" aria-label="页码"> <span id="page-count"></span></label><button id="next-page" aria-label="下一页">›</button></div>
+        <div class="tool-group zoom-tools" role="group" aria-label="页面缩放"><button id="zoom-out" aria-label="缩小" title="缩小 10 个百分点（⌘ / Ctrl −）">−</button><input id="zoom" type="text" inputmode="decimal" aria-label="缩放百分比" title="输入 25%—400%，按回车确认" autocomplete="off" spellcheck="false"><button id="zoom-in" aria-label="放大" title="放大 10 个百分点（⌘ / Ctrl +）">+</button><button id="zoom-fit" aria-pressed="true" title="适合宽度（⌘ / Ctrl 0）">适合宽度</button></div>
+        <div class="tool-group navigation-tools"><button id="navigation-toggle" aria-label="打开目录与书签">导航</button><button id="search-toggle" title="全文搜索（⌘ / Ctrl F）">搜索</button><button id="bookmark-toggle" aria-pressed="false" title="收藏当前页">☆ 书签</button></div>
+        <div class="tool-group highlight-tools"><button id="highlight-toggle" class="toggle active" aria-pressed="true">▰ 连续标记</button><select id="highlight-style" aria-label="标注方式"><option value="highlight">高亮</option><option value="underline">下划线</option><option value="strikeout">删除线</option></select><select id="highlight-color" aria-label="标注颜色"><option value="yellow">黄色</option><option value="green">绿色</option><option value="pink">粉色</option><option value="blue">蓝色</option><option value="purple">紫色</option><option value="orange">橙色</option><option value="red">红色</option></select><button id="undo" class="quiet" disabled title="撤销最近一次标注或删除（⌘Z）">撤销</button></div>
+        <button id="sidebar-toggle" class="quiet" aria-expanded="true">标注 <span id="highlight-count" class="count">0</span></button>
+      </div>
+      <div id="reader-layout" class="reader-layout">
+        <div id="reader-scroll" class="reader-scroll" tabindex="0" aria-label="论文页面">
+          <div id="page-loading" class="page-loading" role="status" hidden>正在加载页面…</div>
+          <div id="pdf-page" class="pdf-page">
+            <canvas id="pdf-canvas"></canvas>
+            <div id="highlight-layer" class="highlight-layer" aria-hidden="true"></div>
+            <div id="search-layer" class="search-layer" aria-hidden="true"></div>
+            <div id="text-layer" class="textLayer"></div>
+          </div>
+          <div id="no-text" class="no-text" hidden>本页没有可选择的文字，可能是扫描页。首版支持带文本层的 PDF。</div>
+          <p class="page-footer"><span id="page-label"></span><span>标注仅保存在本机 · 原 PDF 保持不变</span></p>
+        </div>
+        <aside id="sidebar" class="sidebar" aria-label="阅读卡点">
+          <div class="sidebar-heading"><div><span class="eyebrow">READING WORKSPACE</span><h2 id="sidebar-title">留下的卡点</h2></div><button id="sidebar-close" class="quiet" aria-label="收起阅读侧栏">×</button></div>
+          <div class="sidebar-tabs" role="tablist" aria-label="阅读侧栏功能"><button id="notes-tab" role="tab" aria-selected="true" aria-controls="notes-panel">标注</button><button id="navigation-tab" role="tab" aria-selected="false" aria-controls="navigation-panel" tabindex="-1">目录·书签</button><button id="search-tab" role="tab" aria-selected="false" aria-controls="search-panel" tabindex="-1">搜索</button></div>
+          <section id="notes-panel" role="tabpanel" aria-labelledby="notes-tab">
+          <p class="sidebar-hint">标黄就够了，讲解时再回到完整句子。</p>
+          <div class="export-actions"><button id="copy-all">复制阅读卡点</button><button id="export-markdown">导出 Markdown</button><button id="export-pdf">导出批注 PDF</button></div>
+          <label class="filter-label">查看<select id="highlight-filter"><option value="all">全部标注</option><option value="page">当前页</option><option value="vocabulary">确认的生词</option></select></label>
+          <div id="highlight-list" class="highlight-list"></div>
+          </section>
+          <section id="navigation-panel" role="tabpanel" aria-labelledby="navigation-tab" hidden>
+            <h3>页面书签</h3><p class="sidebar-hint">用工具栏的 ☆ 收藏当前页。书签只保存阅读位置，不改动原 PDF。</p><div id="bookmark-list" class="bookmark-list"></div>
+            <h3>文档目录</h3><p id="outline-status" class="sidebar-hint" role="status">正在读取目录…</p><nav id="outline-list" class="outline-list" aria-label="PDF 内置目录"></nav>
+          </section>
+          <section id="search-panel" role="tabpanel" aria-labelledby="search-tab" hidden>
+            <form id="search-form" class="search-form" role="search"><label for="search-input">在这篇论文中查找</label><div><input id="search-input" type="search" maxlength="200" autocomplete="off" placeholder="单词或短语"><button id="search-submit" type="submit">查找</button></div></form>
+            <div class="search-navigation"><button id="search-previous" aria-label="上一个搜索结果" disabled>↑</button><button id="search-next" aria-label="下一个搜索结果" disabled>↓</button><button id="search-clear" class="quiet">清除</button></div>
+            <p id="search-status" class="sidebar-hint" role="status" aria-live="polite">搜索带文本层的页面；不支持扫描件 OCR。</p><div id="search-results" class="search-results"></div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  </main>
+  <div id="selection-menu" class="selection-menu" hidden><button id="highlight-selection" class="primary">标记这段</button><button id="copy-selection">复制选文</button><button id="cancel-selection" class="quiet" aria-label="取消选文" title="取消（Esc）">×</button></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="/web/app.js"></script>
+</body>
+</html>
