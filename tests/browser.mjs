@@ -15,14 +15,14 @@ const output = path.join(root, 'test-results');
 await fs.mkdir(output, {recursive:true});
 const python = process.env.PAPER_READER_PYTHON || path.join(root,'.venv/bin/python');
 const results = [], consoleErrors = [];
-let service, browser, base, browserContext, page;
+let service, browser, base, browserContext, page, activeCheck, tracingStarted=false;
 
 async function startServer(port = 0) {
   service = spawn(python, ['server.py', '--port',String(port),'--data-dir',dataDir], {cwd:root, stdio:['ignore','pipe','pipe']});
   base = await new Promise((resolve,reject)=>{let stdout='';const timeout=setTimeout(()=>reject(new Error('Server startup timeout')),15000);service.once('exit',code=>reject(new Error(`Server exited ${code}`)));service.stdout.on('data',chunk=>{stdout+=chunk;const match=stdout.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timeout);resolve(match[0]);}});service.stderr.on('data',chunk=>process.stderr.write(chunk));});
 }
 async function stopServer() { const child=service;if(!child||child.exitCode!==null)return;await new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGTERM');}); }
-async function record(name, operation) { await operation(); results.push({name,passed:true});console.log('PASS',name); }
+async function record(name, operation) { activeCheck=name;await operation();results.push({name,passed:true});console.log('PASS',name); }
 async function saved() { await page.waitForFunction(()=>document.querySelector('#save-status').textContent==='已保存到本机'); }
 async function zoomRendered(value) {
   await page.waitForFunction(expected=>document.querySelector('#pdf-page').dataset.zoom===String(expected)&&document.querySelector('#page-loading').hidden,value);
@@ -42,38 +42,50 @@ async function chooseSearchResult(index) {
 async function paneAnchor() { return page.evaluate(()=>{const reader=document.querySelector('#reader-scroll'),r=reader.getBoundingClientRect(),p=document.querySelector('#pdf-page').getBoundingClientRect();return {x:(r.left+reader.clientWidth/2-p.left)/p.width,y:(r.top+reader.clientHeight/2-p.top)/p.height};}); }
 async function count() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()).highlights.length; }
 async function activeRecord() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()); }
-async function wheelReaderUntilSettled(deltaY) {
-  const reader=page.locator('#reader-scroll');await reader.hover();
-  const before=await reader.evaluate(element=>element.scrollTop);
+async function settledReaderScroll(operation, {requireMovement=false,label='scroll'}={}) {
+  const reader=page.locator('#reader-scroll');
   await reader.evaluate(element=>{
-    const start=element.scrollTop,state={moved:false,ended:false};
-    const moved=()=>{state.moved ||= Math.abs(element.scrollTop-start)>.5;};
+    const start={top:element.scrollTop,left:element.scrollLeft},state={moved:false,ended:false,start};
+    const moved=()=>{state.moved ||= Math.abs(element.scrollTop-start.top)>.5||Math.abs(element.scrollLeft-start.left)>.5;};
     const ended=()=>{moved();if(state.moved){state.ended=true;cleanup();}};
     const cleanup=()=>{element.removeEventListener('scroll',moved);element.removeEventListener('scrollend',ended);};
-    element.readerWheelTest={state,cleanup};
+    element.readerScrollTest={state,moved,cleanup};
     element.addEventListener('scroll',moved);element.addEventListener('scrollend',ended);
   });
   try {
-    // wheel() dispatches input without waiting for compositor scrolling. Hiding the
-    // menu proves only that scrolling started, not that it is safe to select again.
-    await page.mouse.wheel(0,deltaY);
-    await page.waitForFunction(()=>document.querySelector('#reader-scroll').readerWheelTest?.state.ended);
-    const after=await reader.evaluate(element=>element.scrollTop);
-    assert((after-before)*Math.sign(deltaY)>.5,'The wheel must actually move the PDF pane before reaching scrollend');
-  } finally {await reader.evaluate(element=>{element.readerWheelTest?.cleanup();delete element.readerWheelTest;});}
+    await page.evaluate(label=>window.readerTestDiagnostics?.log('scroll-operation:start',{label}),label);
+    await operation();
+    const moved=await reader.evaluate(element=>{element.readerScrollTest.moved();return element.readerScrollTest.state.moved;});
+    if(requireMovement||moved)await page.waitForFunction(()=>document.querySelector('#reader-scroll').readerScrollTest?.state.ended);
+    await page.evaluate(label=>window.readerTestDiagnostics?.log('scroll-operation:settled',{label}),label);
+  } finally {await reader.evaluate(element=>{element.readerScrollTest?.cleanup();delete element.readerScrollTest;});}
+}
+async function wheelReaderUntilSettled(deltaY) {
+  const reader=page.locator('#reader-scroll');await reader.hover();
+  const before=await reader.evaluate(element=>element.scrollTop);
+  // wheel() returns while compositor scrolling may still be in progress.
+  await settledReaderScroll(()=>page.mouse.wheel(0,deltaY),{requireMovement:true,label:`wheel ${deltaY}`});
+  const after=await reader.evaluate(element=>element.scrollTop);
+  assert((after-before)*Math.sign(deltaY)>.5,'The wheel must actually move the PDF pane before reaching scrollend');
+}
+async function scrollTextTarget(span,fragment) {
+  // Moving the text back into view after a wheel is a NEW scroll. It must finish
+  // before measuring coordinates or dragging, otherwise its late event can
+  // correctly dismiss a selection menu that the test has only just reopened.
+  await settledReaderScroll(()=>span.scrollIntoViewIfNeeded(),{label:`text target: ${fragment}`});
 }
 async function dragSpan(fragment) {
-  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await span.scrollIntoViewIfNeeded();
+  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await scrollTextTarget(span,fragment);
   const box=await span.boundingBox();assert(box&&box.width>10,'Text layer must be selectable');
   await page.mouse.move(box.x+1,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width-1,box.y+box.height/2,{steps:12});await page.mouse.up();
 }
 async function dragAcross(firstText,lastText) {
   const first=page.locator('#text-layer span').filter({hasText:firstText}).first();const last=page.locator('#text-layer span').filter({hasText:lastText}).first();
-  await first.scrollIntoViewIfNeeded();const a=await first.boundingBox(),b=await last.boundingBox();
+  await scrollTextTarget(first,firstText);const a=await first.boundingBox(),b=await last.boundingBox();
   await page.mouse.move(a.x+1,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+b.width-1,b.y+b.height/2,{steps:18});await page.mouse.up();
 }
 async function dragWord(fragment) {
-  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.scrollIntoViewIfNeeded();
+  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await scrollTextTarget(span,fragment);
   const box=await span.evaluate((element,word)=>{const node=element.firstChild;const offset=node.textContent.indexOf(word);const range=document.createRange();range.setStart(node,offset);range.setEnd(node,offset+word.length);const r=range.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};},fragment);
   await page.mouse.move(box.x+.2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width-.2,box.y+box.height/2,{steps:12});await page.mouse.up();
 }
@@ -82,6 +94,17 @@ try {
   await startServer();
   browser=await chromium.launch({headless:true,...(process.env.PAPER_READER_BROWSER_CHANNEL&&process.env.PAPER_READER_BROWSER_CHANNEL!=='bundled'?{channel:process.env.PAPER_READER_BROWSER_CHANNEL}:{})});
   browserContext=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});
+  await browserContext.addInitScript(()=>{
+    const events=[];
+    const state=()=>{const reader=document.querySelector('#reader-scroll'),menu=document.querySelector('#selection-menu'),selection=getSelection();return {top:reader?.scrollTop,left:reader?.scrollLeft,menuHidden:menu?.hidden,selection:selection?.toString(),collapsed:selection?.isCollapsed};};
+    const log=(type,extra={})=>{events.push({at:Number(performance.now().toFixed(1)),type,...state(),...extra});if(events.length>120)events.shift();};
+    window.readerTestDiagnostics={events,state,log};
+    for(const type of ['scroll','scrollend'])document.addEventListener(type,event=>{if(event.target.id==='reader-scroll')log(type);},{capture:true,passive:true});
+    for(const type of ['pointerdown','pointerup'])document.addEventListener(type,event=>log(type,{target:event.target.id||event.target.tagName,targetText:event.target.textContent?.slice(0,90),x:event.clientX,y:event.clientY}),true);
+    document.addEventListener('selectionchange',()=>log('selectionchange'));
+    document.addEventListener('DOMContentLoaded',()=>{const menu=document.querySelector('#selection-menu');if(menu)new MutationObserver(()=>log('menu:hidden-changed')).observe(menu,{attributes:true,attributeFilter:['hidden']});});
+  });
+  await browserContext.tracing.start({screenshots:true,snapshots:true,sources:true});tracingStarted=true;
   page=await browserContext.newPage();page.on('pageerror',err=>consoleErrors.push(err.message));
   await record('empty library and original demo import',async()=>{
     await page.goto(base);await page.locator('#empty-state').waitFor({state:'visible'});await page.click('#open-demo');await page.locator('#text-layer span').first().waitFor();await saved();
@@ -447,6 +470,9 @@ try {
   console.log(`${results.length} browser checks passed. Artifacts: ${output}`);
 } catch(error) {
   if(page)await page.screenshot({path:path.join(output,'failure-private.png')}).catch(()=>{});
-  await fs.writeFile(path.join(output,'browser-results.json'),JSON.stringify({results,error:error.stack,consoleErrors,dataDir},null,2));
+  const diagnostics=await page?.evaluate(()=>({state:window.readerTestDiagnostics?.state(),events:window.readerTestDiagnostics?.events})).catch(()=>undefined);
+  if(diagnostics)console.error('BROWSER INTERACTION DIAGNOSTICS',JSON.stringify({activeCheck,...diagnostics},null,2));
+  if(tracingStarted){await browserContext.tracing.stop({path:path.join(output,'browser-failure-trace.zip')}).catch(()=>{});tracingStarted=false;}
+  await fs.writeFile(path.join(output,'browser-results.json'),JSON.stringify({results,activeCheck,error:error.stack,consoleErrors,dataDir,browserVersion:await browser?.version(),diagnostics},null,2));
   console.error(error);process.exitCode=1;
-} finally { if(browser)await browser.close();await stopServer(); }
+} finally { if(tracingStarted)await browserContext.tracing.stop().catch(()=>{});if(browser)await browser.close();await stopServer(); }
