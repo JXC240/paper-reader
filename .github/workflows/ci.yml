@@ -1,0 +1,119 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install runtime dependency
+        run: python -m pip install -r requirements.txt
+      - name: Python unit and HTTP checks
+        shell: bash
+        run: |
+          mkdir -p test-results/unit
+          set -o pipefail
+          python -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee test-results/unit/results.log
+      - name: Upload failed unit report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unit-${{ matrix.os }}-python-${{ matrix.python }}
+          path: test-results/unit/results.log
+          if-no-files-found: ignore
+          retention-days: 7
+  search:
+    name: Search / Node 22
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - name: Search checks without browser dependencies
+        shell: bash
+        run: |
+          mkdir -p test-results/search
+          set -o pipefail
+          node --test tests/search.mjs 2>&1 | tee test-results/search/results.log
+      - name: Upload failed search report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: search-node-22
+          path: test-results/search/results.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser:
+    name: Browser / Chromium / Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: '10'
+          run_install: false
+      - name: Prepare pinned local reader assets
+        run: ./start.sh --prepare-only
+      - name: Install test browser
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+      - name: Browser checks with synthetic PDFs and a temporary library
+        shell: bash
+        env:
+          PAPER_READER_BROWSER_CHANNEL: bundled
+        run: |
+          mkdir -p test-results
+          set -o pipefail
+          pnpm test:browser 2>&1 | tee test-results/browser.log
+      - name: Upload failed browser report and synthetic screenshot
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-chromium-linux
+          path: |
+            test-results/browser.log
+            test-results/browser-results.json
+            test-results/failure-private.png
+          if-no-files-found: ignore
+          retention-days: 7

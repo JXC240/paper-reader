@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security reporting / 安全问题
+    url: https://github.com/JXC240/paper-reader/security/policy
+    about: Read the policy before reporting sensitive findings. / 提交敏感问题前请先阅读报告方式。

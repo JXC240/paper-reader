@@ -20,12 +20,69 @@ let searchSerial = 0, searchResults = [], activeSearch = -1, searchQuery = '', s
 let pageTextCache = new Map(), renderedTextDivs = new Map();
 let documentQueue = Promise.resolve();
 let sessionRefreshPromise;
+let assistantFiles = {}, sessionWarnings = [];
+const draftPrefix = 'paper-reader:note-draft:v1:', noteDrafts = new Map();
+const dirtyDraftKeys = new Set();
+let draftStorageWarning = false;
 const SEARCH_LIMIT = 500;
 
 function status(text, state = '') { $('save-status').textContent = text; $('save-status').className = `save-status ${state}`; }
 function error(message, retry = false) { $('error-text').textContent = message; $('error-banner').hidden = false; $('retry-save').hidden = !(retry || failedWrites.length); }
 function clearError() { $('error-banner').hidden = true; }
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 3500); }
+function draftKey(docId, highlightId) { return `${draftPrefix}${docId}:${highlightId}`; }
+function noteDraft(docId, highlightId) {
+  const key = draftKey(docId, highlightId);
+  if (noteDrafts.has(key)) return noteDrafts.get(key);
+  try {
+    const text = localStorage.getItem(key);
+    if (text !== null) { noteDrafts.set(key, text); return text; }
+  } catch { /* Memory still protects drafts while this page remains open. */ }
+  return undefined;
+}
+function rememberNoteDraft(docId, highlightId, text, savedText) {
+  const key = draftKey(docId, highlightId); noteDrafts.set(key, text);
+  if (text !== savedText) dirtyDraftKeys.add(key); else dirtyDraftKeys.delete(key);
+  try { localStorage.setItem(key, text); draftStorageWarning = false; }
+  catch {
+    draftStorageWarning = true;
+    error('浏览器无法保存笔记草稿。当前页面内仍会保留，请点击“保存笔记”后再关闭或刷新。');
+  }
+  updateDraftStatus();
+}
+function clearNoteDraft(docId, highlightId, savedText) {
+  const key = draftKey(docId, highlightId);
+  // A slow save must not erase text typed after the Save button was pressed.
+  if (noteDrafts.get(key) === savedText) noteDrafts.delete(key);
+  if (!noteDrafts.has(key)) dirtyDraftKeys.delete(key);
+  try { if (localStorage.getItem(key) === savedText) localStorage.removeItem(key); } catch {}
+}
+function currentDraftCount() {
+  return current?.highlights.filter(h => {
+    const draft = noteDraft(current.id, h.id);
+    return draft !== undefined && draft !== (h.note || '');
+  }).length || 0;
+}
+function updateDraftStatus() {
+  const count = currentDraftCount();
+  $('draft-status').hidden = !count;
+  $('draft-status').textContent = count ? `${count} 条笔记尚未保存${draftStorageWarning ? ' · 草稿仅在当前页面保留' : ' · 草稿已暂存于此浏览器'}` : '';
+}
+function documentLink(docId = current?.id) {
+  const url = new URL(window.location.href); url.search = ''; url.hash = '';
+  if (docId) url.searchParams.set('doc', docId);
+  return url.href;
+}
+function documentContext() {
+  if (!current) return '';
+  const files = assistantFiles[current.id];
+  return `论文：${current.name}\n论文编号：${current.id}\n固定阅读链接：${documentLink()}（仅在运行本阅读库的电脑上可用）\n` +
+    (files ? `本篇标注记录：${files.record}\n本篇阅读笔记：${files.markdown}\n原文 PDF：${files.pdf}\n` : '') +
+    '请以这篇论文的编号和固定记录为准，不要依赖全局“最近打开的论文”。';
+}
+function showSessionWarnings() {
+  if (sessionWarnings.length) error(sessionWarnings.map(item => item.message).join('；'));
+}
 async function refreshSessionToken(expiredToken) {
   // Another request may have already refreshed while this 403 was in flight.
   if (token && token !== expiredToken) return;
@@ -66,7 +123,7 @@ function enqueueWrite(operation) {
   return result;
 }
 async function settle() { await savingQueue; if (failedWrites.length) throw new Error('仍有未保存的更改，请先重试保存'); }
-function controlsDisabled(disabled) { controlsBusy = disabled; for (const id of ['document-picker','previous-page','next-page','page-number','zoom','zoom-out','zoom-in','zoom-fit','highlight-toggle','highlight-style','highlight-color','copy-all','export-markdown','export-pdf','navigation-toggle','search-toggle','bookmark-toggle','search-submit']) $(id).disabled = disabled; }
+function controlsDisabled(disabled) { controlsBusy = disabled; for (const id of ['document-picker','previous-page','next-page','page-number','zoom','zoom-out','zoom-in','zoom-fit','highlight-toggle','highlight-style','highlight-color','copy-all','copy-document-link','export-markdown','export-pdf','navigation-toggle','search-toggle','bookmark-toggle','search-submit']) $(id).disabled = disabled; }
 
 function selectedPdfText() {
   const selection = window.getSelection(), layer = $('text-layer');
@@ -151,6 +208,7 @@ async function loadDocument(docId) {
     if (pdf) await pdf.destroy();
     pdf = null; pageView = null;
     current = await json(`/api/documents/${docId}/activate`, 'POST', {});
+    history.replaceState({doc:current.id}, '', documentLink(current.id));
     current.bookmarks ||= [];
     pageNumber = current.position.page; zoom = current.position.zoom; requestedZoom = zoom;
     undoAction = null; $('undo').disabled = true;
@@ -158,13 +216,15 @@ async function loadDocument(docId) {
     $('empty-state').hidden = true; $('workspace').hidden = false;
     pdf = await getDocument({url:`/api/documents/${docId}/pdf`, cMapUrl:'/vendor/pdfjs/cmaps/', cMapPacked:true, standardFontDataUrl:'/vendor/pdfjs/standard_fonts/', wasmUrl:'/vendor/pdfjs/wasm/'}).promise;
     pageLabels = await pdf.getPageLabels() || [];
-    documents = (await json('/api/session')).documents;
+    const session = await json('/api/session');
+    documents = session.documents; assistantFiles = session.assistantFiles || {}; sessionWarnings = session.warnings || [];
     renderDocumentPicker(); setSidebar(sidebarVisible); renderList(); renderBookmarks();
     $('outline-list').replaceChildren(); $('outline-status').textContent = '正在读取目录…';
     await renderPage();
     if (current.position.anchor) restoreAnchor(current.position.anchor);
     else { $('reader-scroll').scrollTop = 0; $('reader-scroll').scrollLeft = 0; }
     status('已保存到本机', 'saved');
+    showSessionWarnings();
     loadOutline(pdf, generation).catch(err => { if (generation === documentSerial) $('outline-status').textContent = `目录读取失败：${err.message}`; });
   } catch (err) {
     if (replacingDocument) {
@@ -291,8 +351,8 @@ async function addSelection(selection) {
 
 async function deleteHighlight(h) {
   if(h.id.startsWith('pending-'))return;
-  const docId=current.id;
-  await enqueueWrite(async()=>{await json(`/api/documents/${docId}/highlights/${h.id}`,'DELETE'); if(current?.id===docId){current.highlights=current.highlights.filter(item=>item.id!==h.id);paintHighlights();renderList();rememberUndo({type:'delete',item:h,docId});}});
+  const docId=current.id, draft=noteDraft(docId,h.id);
+  await enqueueWrite(async()=>{await json(`/api/documents/${docId}/highlights/${h.id}`,'DELETE'); if(draft!==undefined)clearNoteDraft(docId,h.id,draft);if(current?.id===docId){current.highlights=current.highlights.filter(item=>item.id!==h.id);paintHighlights();renderList();rememberUndo({type:'delete',item:h,docId,draft});}});
 }
 async function updateHighlight(h, body) {
   if(h.id.startsWith('pending-'))return;
@@ -300,7 +360,17 @@ async function updateHighlight(h, body) {
   await enqueueWrite(async()=>{const item=await json(`/api/documents/${docId}/highlights/${h.id}`,'PATCH',body); if(current?.id===docId){Object.assign(h,item);paintHighlights();renderList();}});
 }
 function button(label, action, className='') { const b=document.createElement('button');b.textContent=label;b.className=className;b.addEventListener('click',()=>Promise.resolve(action()).catch(err=>error(err.message,true)));return b; }
-function passageText(h) { return `论文：${current.name}\nPDF 第 ${h.page} 页（页标签 ${h.pageLabel}）\n标注：${styleLabels[h.style||'highlight']} · ${colorLabels[h.color]}\n标注原文：${h.rawText}\n附近原文（请回看PDF核对）：\n${h.contextBefore}【标注】${h.rawText}【标注结束】${h.contextAfter}\n\n请找到完整句子，先给准确翻译，再拆短语、主干和修饰关系，结合上下文解释。删除线只是读者标记，不代表原文错误。`; }
+function passageText(h) { return `${documentContext()}\n\nPDF 第 ${h.page} 页（页标签 ${h.pageLabel}）\n标注：${styleLabels[h.style||'highlight']} · ${colorLabels[h.color]}\n标注原文：${h.rawText}\n附近原文（请回看PDF核对）：\n${h.contextBefore}【标注】${h.rawText}【标注结束】${h.contextAfter}\n\n请找到完整句子，先给准确翻译，再拆短语、主干和修饰关系，结合上下文解释。删除线只是读者标记，不代表原文错误。`; }
+async function saveNote(h, text) {
+  if (h.id.startsWith('pending-')) return;
+  const docId = current.id;
+  await enqueueWrite(async () => {
+    const item = await json(`/api/documents/${docId}/highlights/${h.id}`, 'PATCH', {note:text});
+    clearNoteDraft(docId, h.id, text);
+    if (current?.id === docId) { Object.assign(h,item); renderList(); }
+  });
+  toast('笔记已保存');
+}
 function markPicker(labels,value,label,field,h) {
   const select=document.createElement('select');select.setAttribute('aria-label',label);select.disabled=h.id.startsWith('pending-');
   for(const [key,text] of Object.entries(labels)){const option=document.createElement('option');option.value=key;option.textContent=text;select.append(option);}
@@ -324,11 +394,25 @@ function renderList() {
     marks.append(markPicker(styleLabels,h.style||'highlight','此标注方式','style',h),markPicker(colorLabels,h.color,'此标注颜色','color',h));
     const actions=document.createElement('div');actions.className='card-actions';
     actions.append(button('复制',()=>copy(passageText(h))),button(h.kind==='vocabulary'?'改为卡点':'收为生词',()=>updateHighlight(h,{kind:h.kind==='vocabulary'?'passage':'vocabulary'})),button('删除',()=>deleteHighlight(h)));
-    const details=document.createElement('details');const summary=document.createElement('summary');summary.textContent=h.note?'查看讲解／笔记':'补充讲解／笔记（可选）';
-    const note=document.createElement('textarea');note.value=h.note;note.setAttribute('aria-label','讲解或笔记');note.placeholder='可以把聊天中确认过的解释粘贴在这里。';
-    details.append(summary,note,button('保存笔记',async()=>{await updateHighlight(h,{note:note.value});toast('笔记已保存');},'note-save'));
+    const docId = current.id, draft = noteDraft(docId,h.id), dirty = draft !== undefined && draft !== (h.note || '');
+    if (dirty) dirtyDraftKeys.add(draftKey(docId,h.id));
+    else { dirtyDraftKeys.delete(draftKey(docId,h.id)); if (draft !== undefined) clearNoteDraft(docId,h.id,draft); }
+    const details=document.createElement('details');details.open=dirty;const summary=document.createElement('summary');summary.textContent=dirty?'笔记草稿 · 尚未保存':h.note?'查看讲解／笔记':'补充讲解／笔记（可选）';
+    const note=document.createElement('textarea');note.value=draft ?? h.note ?? '';note.setAttribute('aria-label','讲解或笔记');note.placeholder='先写下自己的理解，或粘贴已核对的解释；点击保存后才写入阅读库。';
+    note.disabled=h.id.startsWith('pending-');
+    const draftHint=document.createElement('p');draftHint.className='note-draft-hint';draftHint.hidden=!dirty;draftHint.textContent=draftStorageWarning?'尚未保存 · 浏览器暂存不可用，请及时保存':'尚未保存到阅读库 · 草稿仅暂存于此浏览器';
+    const save=button('保存笔记',()=>saveNote(h,note.value),'note-save');save.disabled=note.disabled;
+    note.addEventListener('input',()=>{
+      rememberNoteDraft(docId,h.id,note.value,h.note || '');
+      const changed=note.value !== (h.note || '');
+      summary.textContent=changed?'笔记草稿 · 尚未保存':h.note?'查看讲解／笔记':'补充讲解／笔记（可选）';
+      draftHint.hidden=!changed;
+      draftHint.textContent=draftStorageWarning?'尚未保存 · 浏览器暂存不可用，请及时保存':'尚未保存到阅读库 · 草稿仅暂存于此浏览器';
+    });
+    details.append(summary,note,draftHint,save);
     card.append(top,text,marks,actions,details);list.append(card);
   }
+  updateDraftStatus();
 }
 
 function navigate(number, destination) {
@@ -557,6 +641,14 @@ async function showSearchMatch(index) {
 }
 async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制，回到聊天粘贴即可');}catch{error('剪贴板暂不可用，请使用 Markdown 导出');}}
 async function download(operation){await settle();const response=await api(`/api/documents/${current.id}/${operation}`);const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=current.name.replace(/\.pdf$/i,'')+(operation==='markdown'?'.md':'-annotated.pdf');a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast(operation==='markdown'?'已导出笔记，可在 Obsidian 中打开':'已导出批注副本，原 PDF 保持不变');}
+async function backupLibrary() {
+  await settle();
+  const response = await api('/api/library/backup'), blob = await response.blob();
+  const url = URL.createObjectURL(blob), link = document.createElement('a');
+  link.href = url; link.download = `paper-reader-backup-${new Date().toISOString().slice(0,10)}.zip`; link.click();
+  setTimeout(() => URL.revokeObjectURL(url),5000);
+  toast(currentDraftCount() || dirtyDraftKeys.size ? '阅读库已备份；未保存的浏览器草稿不在备份内，请先保存笔记' : '阅读库已备份，包含原文、标注和已保存笔记');
+}
 async function importFile(file){if(!file)return;await settle();status('正在导入…');try{const result=await (await api('/api/import',{method:'POST',headers:{'X-Filename':encodeURIComponent(file.name),'Content-Type':'application/pdf'},body:file})).json();await openDocument(result.id);}catch(err){error(err.message);status('导入未完成','failed');}finally{$('file-input').value='';}}
 
 $('file-input').addEventListener('change',event=>importFile(event.target.files[0]));
@@ -624,15 +716,26 @@ $('reader-scroll').addEventListener('scroll',()=>{
   positionTimer=setTimeout(()=>flushPosition().catch(()=>{}),400);
 },{passive:true});
 $('highlight-filter').addEventListener('change',renderList);
-$('copy-all').addEventListener('click',async()=>{try{await settle();const text=await(await api(`/api/documents/${current.id}/markdown`)).text();await copy(text);}catch(err){error(err.message);}});
+$('copy-all').addEventListener('click',async()=>{try{await settle();const text=await(await api(`/api/documents/${current.id}/markdown`)).text();await copy(`${documentContext()}\n\n${text}`);}catch(err){error(err.message);}});
+$('copy-document-link').addEventListener('click',()=>copy(documentLink()));
+$('backup-library').addEventListener('click',()=>backupLibrary().catch(err=>error(err.message)));
 for(const [id,operation] of [['export-markdown','markdown'],['export-pdf','annotated.pdf']])$(id).addEventListener('click',()=>download(operation).catch(err=>error(err.message)));
-$('help-toggle').addEventListener('click',()=>$('help').hidden=!$('help').hidden);
+function toggleHelp(visible = $('help').hidden) { $('help').hidden=!visible; $('help-toggle').setAttribute('aria-expanded',String(visible)); }
+$('help-toggle').addEventListener('click',()=>toggleHelp());
 $('dismiss-error').addEventListener('click',clearError);
 $('retry-save').addEventListener('click',async()=>{const operations=failedWrites.splice(0);clearError();for(let i=0;i<operations.length;i++){try{await enqueueWrite(operations[i]);}catch{failedWrites.push(...operations.slice(i+1));break;}}});
-$('undo').addEventListener('click',async()=>{try{await settle();const action=undoAction;if(!action||action.docId!==current.id)return;undoAction=null;$('undo').disabled=true;if(action.type==='add'){await enqueueWrite(async()=>{await json(`/api/documents/${current.id}/highlights/${action.id}`,'DELETE');current.highlights=current.highlights.filter(h=>h.id!==action.id);paintHighlights();renderList();});}else{const restored=await enqueueWrite(()=>json(`/api/documents/${current.id}/highlights`,'POST',action.item));if(action.item.note||action.item.kind==='vocabulary')Object.assign(restored,await json(`/api/documents/${current.id}/highlights/${restored.id}`,'PATCH',{note:action.item.note,kind:action.item.kind}));current.highlights.push(restored);paintHighlights();renderList();}toast('已撤销');}catch(err){error(err.message,true);}});
+$('undo').addEventListener('click',async()=>{try{await settle();const action=undoAction;if(!action||action.docId!==current.id)return;undoAction=null;$('undo').disabled=true;if(action.type==='add'){await enqueueWrite(async()=>{await json(`/api/documents/${current.id}/highlights/${action.id}`,'DELETE');const draft=noteDraft(current.id,action.id);if(draft!==undefined)clearNoteDraft(current.id,action.id,draft);current.highlights=current.highlights.filter(h=>h.id!==action.id);paintHighlights();renderList();});}else{const restored=await enqueueWrite(()=>json(`/api/documents/${current.id}/highlights`,'POST',action.item));if(action.item.note||action.item.kind==='vocabulary')Object.assign(restored,await json(`/api/documents/${current.id}/highlights/${restored.id}`,'PATCH',{note:action.item.note,kind:action.item.kind}));current.highlights.push(restored);if(action.draft!==undefined)rememberNoteDraft(current.id,restored.id,action.draft,restored.note||'');paintHighlights();renderList();}toast('已撤销');}catch(err){error(err.message,true);}});
 document.addEventListener('keydown',event=>{
-  if(event.key==='Escape'){dismissSelectionMenu(true);if(event.target===$('zoom'))updateZoomControls();if(sidebarTab==='search'&&sidebarVisible)showSidebar('search',false).catch(err=>error(err.message));return;}
+  if(event.key==='Escape'){dismissSelectionMenu(true);toggleHelp(false);if(event.target===$('zoom'))updateZoomControls();if(sidebarTab==='search'&&sidebarVisible)showSidebar('search',false).catch(err=>error(err.message));return;}
   const editing=event.target.isContentEditable||/INPUT|TEXTAREA|SELECT/.test(event.target.tagName);
+  if (!editing && !event.metaKey && !event.ctrlKey && !event.altKey && event.key === '?') { event.preventDefault(); toggleHelp(); return; }
+  // Restrict reading keys to the PDF pane/body; buttons and sidebar controls keep native keyboard behavior.
+  const readingFocus = event.target === document.body || event.target.closest('#reader-scroll');
+  if (pdf && !controlsBusy && !editing && readingFocus && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && ['ArrowLeft','ArrowRight','PageUp','PageDown','Home','End'].includes(event.key)) {
+    event.preventDefault();
+    navigate(event.key==='Home'?1:event.key==='End'?pdf.numPages:pageNumber+(['ArrowLeft','PageUp'].includes(event.key)?-1:1)).catch(err=>error(err.message));
+    return;
+  }
   if((event.metaKey||event.ctrlKey)&&event.key.toLowerCase()==='f'&&pdf&&!controlsBusy){event.preventDefault();event.stopPropagation();openSearch().catch(err=>error(err.message));return;}
   if((event.metaKey||event.ctrlKey)&&pdf&&(!editing||event.target===$('zoom'))){
     if(['+','=','-','0'].includes(event.key)){event.preventDefault();event.stopPropagation();if(!controlsBusy){if(event.key==='0')requestZoom('fit');else stepZoom(event.key==='-'?-1:1);}return;}
@@ -645,11 +748,19 @@ window.addEventListener('pagehide',()=>{
   if(current&&pageReady)fetch(`/api/documents/${current.id}/position`,{method:'PUT',headers:{'X-Reader-Token':token,'Content-Type':'application/json'},body:JSON.stringify(positionSnapshot()),keepalive:true}).catch(()=>{});
 });
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden')flushPosition().catch(()=>{});});
-window.addEventListener('beforeunload',event=>{if(pendingWrites||failedWrites.length){event.preventDefault();event.returnValue='';}});
+window.addEventListener('beforeunload',event=>{if(pendingWrites||failedWrites.length||currentDraftCount()||dirtyDraftKeys.size){event.preventDefault();event.returnValue='';}});
 
 async function boot(){
   updateMarkTools();
   const session=await json('/api/session');token=session.token;documents=session.documents;
-  if(session.activeId){await openDocument(session.activeId);}else{$('empty-state').hidden=false;status('本机工作空间','saved');for(const doc of documents)$('recent-documents').append(button(doc.name,()=>openDocument(doc.id)));}
+  assistantFiles=session.assistantFiles||{};sessionWarnings=session.warnings||[];
+  renderDocumentPicker();
+  const explicitId=new URL(window.location.href).searchParams.get('doc');
+  if (explicitId !== null && !documents.some(doc=>doc.id===explicitId)) {
+    $('empty-state').hidden=false;status('论文链接无效','failed');
+    error('这个固定链接对应的论文不在当前阅读库中。请打开原论文，或从下方选择论文；页面没有切换到其他论文。');
+  } else if(explicitId || session.activeId) await openDocument(explicitId || session.activeId);
+  else {$('empty-state').hidden=false;status('本机工作空间','saved');showSessionWarnings();}
+  for(const doc of documents)$('recent-documents').append(button(doc.name,()=>openDocument(doc.id)));
 }
 boot().catch(err=>{error(err.message+'。请确认本机服务正在运行，再刷新页面。');status('连接未完成','failed');$('empty-state').hidden=false;});

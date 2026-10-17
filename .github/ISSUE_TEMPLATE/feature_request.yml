@@ -1,0 +1,20 @@
+name: Feature request / 功能建议
+description: Describe a reading problem and the improvement you need / 描述阅读中的困难和希望的改进
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Reading problem / 阅读痛点
+      description: What were you trying to read or do? / 你当时想完成什么操作？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired behavior / 希望的效果
+      description: Explain the workflow and any existing workaround. / 描述使用流程和目前的替代方法。
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: Please keep examples free of personal research data. / 请不要在示例中包含私人科研数据。

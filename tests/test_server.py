@@ -6,8 +6,10 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
+import zipfile
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Highlight
@@ -92,6 +94,88 @@ class StoreTests(unittest.TestCase):
         for thread in threads:
             thread.join()
         self.assertEqual(len(self.store.read(self.doc_id)["highlights"]), 12)
+
+    def test_activation_keeps_an_edit_scheduled_at_the_first_unlocked_boundary(self):
+        """Force the old read/save gap without relying on request timing or sleeps."""
+        released, edited = threading.Event(), threading.Event()
+        activation = None
+        errors = []
+
+        class AfterUnlock:
+            def __init__(self):
+                self.lock, self.depth, self.fired = threading.RLock(), threading.local(), False
+
+            def __enter__(self):
+                self.lock.acquire()
+                self.depth.value = getattr(self.depth, "value", 0) + 1
+
+            def __exit__(self, *unused):
+                self.depth.value -= 1
+                self.lock.release()
+                if threading.current_thread() is activation and self.depth.value == 0 and not self.fired:
+                    self.fired = True
+                    released.set()
+                    if not edited.wait(3):
+                        raise AssertionError("Concurrent edit did not reach its scheduled boundary")
+
+        self.store.lock = AfterUnlock()
+
+        def activate():
+            try:
+                self.store.activate(self.doc_id)
+            except Exception as error:
+                errors.append(error)
+
+        def edit():
+            try:
+                if not released.wait(3):
+                    raise AssertionError("Activation did not release the store lock")
+                self.store.add_highlight(self.doc_id, selection())
+            except Exception as error:
+                errors.append(error)
+            finally:
+                edited.set()
+
+        activation = threading.Thread(target=activate)
+        editor = threading.Thread(target=edit)
+        activation.start()
+        editor.start()
+        activation.join(5)
+        editor.join(5)
+        self.assertFalse(activation.is_alive() or editor.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.store.read(self.doc_id)["highlights"]), 1)
+
+    def test_document_snapshots_stay_bound_when_another_paper_becomes_active(self):
+        self.store.add_highlight(self.doc_id, selection())
+        writer = PdfWriter()
+        writer.add_page(PdfReader(io.BytesIO(self.payload)).pages[0])
+        output = io.BytesIO()
+        writer.write(output)
+        other = self.store.import_pdf(output.getvalue(), "Other.pdf")
+        paths = self.store.assistant_files(self.doc_id)
+        self.assertIn("A highlight is a question", Path(paths["markdown"]).read_text())
+        self.assertEqual(json.loads(Path(paths["record"]).read_text())["id"], self.doc_id)
+        self.assertEqual(json.loads((self.store.directory / "current-reading.json").read_text())["id"], other["id"])
+        self.store.update_highlight(self.doc_id, "a" * 32, {"note": "Saved while Other.pdf is active"})
+        self.assertIn("Saved while Other.pdf is active", Path(paths["markdown"]).read_text())
+        self.assertNotIn("Saved while Other.pdf is active", (self.store.directory / "current-reading.md").read_text())
+
+    def test_corrupt_record_is_isolated_without_rewriting_it(self):
+        broken_id = "b" * 64
+        folder = self.store.folder(broken_id)
+        folder.mkdir(parents=True)
+        path = folder / "record.json"
+        for content in [b"{broken", json.dumps({"id": broken_id, "name": "Incomplete"}).encode()]:
+            with self.subTest(content=content):
+                path.write_bytes(content)
+                documents, warnings = self.store.catalog()
+                self.assertEqual([item["id"] for item in documents], [self.doc_id])
+                self.assertEqual(warnings[0]["documentId"], broken_id)
+                self.assertNotIn(str(folder), json.dumps(warnings))
+                self.assertEqual(path.read_bytes(), content)
+                with self.assertRaises(InvalidRequest):
+                    self.store.backup()
 
     def test_existing_annotations_are_preserved_on_export(self):
         writer = PdfWriter()
@@ -296,6 +380,45 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/import", "POST", DEMO.read_bytes()).status, 403)
         for path in ["/.git/config", "/data/current-reading.json", "/web/../../server.py", "/server.py"]:
             self.assertEqual(self.request(path).status, 404)
+
+    def test_session_reports_isolated_documents_and_stable_assistant_paths(self):
+        record = self.store.import_pdf(DEMO.read_bytes(), "Valid.pdf")
+        broken_id = "b" * 64
+        folder = self.store.folder(broken_id)
+        folder.mkdir(parents=True)
+        (folder / "record.json").write_text("{broken")
+        (self.store.directory / "active.json").write_text(json.dumps({"id": broken_id}))
+        response = self.request("/api/session")
+        self.assertEqual(response.status, 200)
+        session = json.load(response)
+        self.assertEqual(session["version"], "0.4.0")
+        self.assertIsNone(session["activeId"])
+        self.assertEqual(len(session["documents"]), 1)
+        self.assertEqual(session["warnings"][0]["documentId"], broken_id)
+        self.assertTrue(Path(session["assistantFiles"][record["id"]]["markdown"]).is_file())
+        self.assertEqual(self.request("/api/library/backup").status, 400)
+
+    def test_http_activation_uses_the_atomic_store_operation(self):
+        record = self.store.import_pdf(DEMO.read_bytes(), "Demo.pdf")
+        with patch.object(self.store, "activate", wraps=self.store.activate) as activate:
+            response = self.request(f'/api/documents/{record["id"]}/activate', "POST", b"{}",
+                                    {"X-Reader-Token": self.token})
+        self.assertEqual(response.status, 200)
+        activate.assert_called_once_with(record["id"])
+
+    def test_http_backup_download_contains_original_and_saved_metadata(self):
+        record = self.store.import_pdf(DEMO.read_bytes(), "Demo.pdf")
+        self.store.add_highlight(record["id"], selection())
+        response = self.request("/api/library/backup")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.headers["Content-Type"], "application/zip")
+        with zipfile.ZipFile(response) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            self.assertEqual(manifest["documents"], [record["id"]])
+            self.assertEqual(archive.read(f'documents/{record["id"]}/original.pdf'), DEMO.read_bytes())
+            saved = json.loads(archive.read(f'documents/{record["id"]}/record.json'))
+            self.assertEqual(saved["highlights"][0]["rawText"], selection()["rawText"])
+        self.assertEqual(self.request("/api/library/backup", headers={"Origin": "https://unrelated.example"}).status, 403)
 
     def test_http_import_persist_export_and_position(self):
         headers = {"X-Reader-Token": self.token, "X-Filename": "Demo.pdf"}

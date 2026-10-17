@@ -17,6 +17,7 @@ import threading
 import urllib.parse
 import uuid
 import webbrowser
+import zipfile
 
 from pypdf import PdfReader, PdfWriter
 from pypdf.annotations import Highlight
@@ -85,6 +86,91 @@ class InvalidRequest(ValueError):
     pass
 
 
+class CorruptRecord(InvalidRequest):
+    pass
+
+
+def validate_record(record, doc_id):
+    """Check persisted metadata before it reaches the reader or a restored library."""
+    def require(condition):
+        if not condition:
+            raise CorruptRecord("论文记录损坏，请从备份恢复；原文件未被修改")
+
+    def text(value, maximum=30000, *, nonempty=False):
+        return isinstance(value, str) and len(value) <= maximum and (not nonempty or bool(value.strip()))
+
+    def number(value):
+        return type(value) in (int, float) and -1e9 <= value <= 1e9 and math.isfinite(value)
+
+    require(isinstance(record, dict))
+    require(record.get("schemaVersion") == 1 and type(record.get("schemaVersion")) is int)
+    require(record.get("id") == doc_id and isinstance(doc_id, str) and bool(ID_PATTERN.fullmatch(doc_id)))
+    require(text(record.get("name"), 240, nonempty=True))
+    count = record.get("pageCount")
+    require(type(count) is int and 1 <= count <= 1000000)
+    for field in ("createdAt", "updatedAt"):
+        require(text(record.get(field), 100, nonempty=True))
+    position = record.get("position")
+    require(isinstance(position, dict))
+    require(type(position.get("page")) is int and 1 <= position["page"] <= count)
+    zoom = position.get("zoom")
+    require(zoom == "fit" or (number(zoom) and 0.25 <= zoom <= 4))
+    if "anchor" in position:
+        anchor = position["anchor"]
+        require(isinstance(anchor, dict) and all(number(anchor.get(axis)) and 0 <= anchor[axis] <= 1 for axis in ("x", "y")))
+    highlights, bookmarks = record.get("highlights"), record.get("bookmarks", [])
+    require(isinstance(highlights, list) and isinstance(bookmarks, list))
+    seen = set()
+    for item in highlights:
+        require(isinstance(item, dict))
+        key = item.get("id")
+        require(isinstance(key, str) and bool(re.fullmatch(r"[0-9a-f]{32}", key)) and key not in seen)
+        seen.add(key)
+        require(type(item.get("page")) is int and 1 <= item["page"] <= count)
+        require(type(item.get("textOrder", 0)) is int and 0 <= item.get("textOrder", 0) <= 1000000)
+        for field, limit in (("rawText", 30000), ("text", 30000), ("note", 30000),
+                             ("contextBefore", 5000), ("contextAfter", 5000), ("pageLabel", 60)):
+            require(text(item.get(field), limit))
+        require(text(item["rawText"], nonempty=True))
+        require(isinstance(item.get("color"), str) and item["color"] in COLORS)
+        require(isinstance(item.get("style", "highlight"), str) and item.get("style", "highlight") in STYLES)
+        require(item.get("kind") in ("passage", "vocabulary"))
+        quads = item.get("quads")
+        require(isinstance(quads, list) and 1 <= len(quads) <= 500)
+        require(all(isinstance(quad, list) and len(quad) == 8 and all(number(value) for value in quad) for quad in quads))
+    seen = set()
+    for item in bookmarks:
+        require(isinstance(item, dict))
+        page = item.get("page")
+        require(type(page) is int and 1 <= page <= count and page not in seen)
+        seen.add(page)
+        require(text(item.get("title"), 200, nonempty=True))
+        require(all(text(item.get(field), 100, nonempty=True) for field in ("createdAt", "updatedAt")))
+    return record
+
+
+def validate_document(record, payload):
+    """Bind restored metadata and annotation geometry to the actual PDF bytes."""
+    if not payload.startswith(b"%PDF-") or hashlib.sha256(payload).hexdigest() != record["id"]:
+        raise CorruptRecord("论文原文件校验失败")
+    try:
+        reader = PdfReader(io.BytesIO(payload))
+        if reader.is_encrypted and not reader.decrypt(""):
+            raise CorruptRecord("无法读取加密的论文原文件")
+        if len(reader.pages) != record["pageCount"]:
+            raise CorruptRecord("论文页数与记录不一致")
+        for highlight in record["highlights"]:
+            box = reader.pages[highlight["page"] - 1].cropbox
+            if any(not float(box.left) - 2 <= x <= float(box.right) + 2
+                   or not float(box.bottom) - 2 <= y <= float(box.top) + 2
+                   for quad in highlight["quads"] for x, y in zip(quad[0::2], quad[1::2])):
+                raise CorruptRecord("标注坐标超出原论文页面")
+    except CorruptRecord:
+        raise
+    except Exception as error:
+        raise CorruptRecord("无法读取论文原文件") from error
+
+
 class Store:
     def __init__(self, directory):
         self.directory = Path(directory).resolve()
@@ -98,27 +184,63 @@ class Store:
 
     def read(self, doc_id):
         with self.lock:
-            record = json.loads((self.folder(doc_id) / "record.json").read_text("utf-8"))
+            try:
+                record = json.loads((self.folder(doc_id) / "record.json").read_text("utf-8"))
+                validate_record(record, doc_id)
+            except (json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise CorruptRecord("论文记录损坏，请从备份恢复；原文件未被修改") from error
             # Old records remain unchanged on disk until the reader saves an edit.
             record.setdefault("bookmarks", [])
             return record
 
     def list(self):
+        return self.catalog()[0]
+
+    def catalog(self):
         with self.lock:
-            result = []
-            for path in (self.directory / "documents").glob("*/record.json"):
-                item = json.loads(path.read_text("utf-8"))
-                result.append({k: item[k] for k in ("id", "name", "pageCount", "updatedAt")})
-            return sorted(result, key=lambda item: item["updatedAt"], reverse=True)
+            result, warnings = [], []
+            for folder in (self.directory / "documents").glob("*"):
+                if not folder.is_dir() or not ID_PATTERN.fullmatch(folder.name):
+                    warnings.append({"code": "corrupt-record", "documentId": "invalid-folder",
+                                     "message": "阅读库中有无法识别的项目，请检查备份。"})
+                    continue
+                try:
+                    item = self.read(folder.name)
+                    if not (folder / "original.pdf").is_file():
+                        raise FileNotFoundError()
+                    result.append({k: item[k] for k in ("id", "name", "pageCount", "updatedAt")})
+                except (OSError, InvalidRequest):
+                    warnings.append({"code": "corrupt-record", "documentId": folder.name,
+                                     "message": "此论文的记录或原文件无法读取，已隔离；其他论文仍可使用。"})
+            return sorted(result, key=lambda item: item["updatedAt"], reverse=True), warnings
 
     def active(self):
-        path = self.directory / "active.json"
-        return json.loads(path.read_text())["id"] if path.exists() else None
+        with self.lock:
+            try:
+                doc_id = json.loads((self.directory / "active.json").read_text())["id"]
+                return doc_id if isinstance(doc_id, str) and ID_PATTERN.fullmatch(doc_id) else None
+            except (OSError, ValueError, KeyError, TypeError):
+                return None
+
+    def activate(self, doc_id):
+        # Hold one lock across the read and save: opening a document must never
+        # replace annotations saved by another request in the intervening gap.
+        with self.lock:
+            return self.save(self.read(doc_id), activate=True)
+
+    def assistant_files(self, doc_id):
+        with self.lock:
+            folder = self.folder(doc_id)
+            if not (folder / "reading.md").exists():
+                atomic_write(folder / "reading.md", self.markdown(self.read(doc_id)).encode())
+            return {"record": str(folder / "record.json"), "markdown": str(folder / "reading.md"),
+                    "pdf": str(folder / "original.pdf")}
 
     def save(self, record, *, activate=False):
         with self.lock:
             record["updatedAt"] = now()
             atomic_json(self.folder(record["id"]) / "record.json", record)
+            atomic_write(self.folder(record["id"]) / "reading.md", self.markdown(record).encode())
             if activate:
                 atomic_json(self.directory / "active.json", {"id": record["id"]})
             if self.active() == record["id"]:
@@ -126,6 +248,56 @@ class Store:
                 atomic_json(self.directory / "current-reading.json", record)
                 atomic_write(self.directory / "current-reading.md", self.markdown(record).encode())
             return record
+
+    def backup(self):
+        """Snapshot authoritative files under the same lock used by every writer."""
+        with self.lock:
+            documents, warnings = self.catalog()
+            if warnings:
+                raise InvalidRequest("阅读库包含无法读取的记录，备份已停止以避免遗漏；请先检查记录或保留整个 data 文件夹副本。")
+            if len(documents) > 3000:
+                raise InvalidRequest("阅读库超过 3,000 篇论文，请暂时手动备份整个 data 文件夹。")
+            files, total = {}, 0
+            for item in documents:
+                doc_id = item["id"]
+                folder = self.folder(doc_id)
+                pdf = (folder / "original.pdf").read_bytes()
+                if hashlib.sha256(pdf).hexdigest() != doc_id:
+                    raise InvalidRequest("论文原文件校验失败，备份已停止；请保留整个 data 文件夹并检查原文件。")
+                record = self.read(doc_id)
+                validate_document(record, pdf)
+                files[f"documents/{doc_id}/original.pdf"] = pdf
+                files[f"documents/{doc_id}/record.json"] = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode()
+                files[f"documents/{doc_id}/reading.md"] = self.markdown(record).encode()
+                if len(pdf) > MAX_UPLOAD or any(len(files[f"documents/{doc_id}/{name}"]) > 64 * 1024 * 1024
+                                               for name in ("record.json", "reading.md")):
+                    raise InvalidRequest("论文或标注记录超过备份大小限制，请手动备份整个 data 文件夹。")
+                total += sum(len(payload) for name, payload in files.items() if name.startswith(f"documents/{doc_id}/"))
+                if total > 1024 * 1024 * 1024:
+                    raise InvalidRequest("阅读库超过 1 GiB，请暂时手动备份整个 data 文件夹。")
+            active = self.active()
+            active = active if active in {item["id"] for item in documents} else None
+            if active:
+                record = self.read(active)
+                files["active.json"] = (json.dumps({"id": active}) + "\n").encode()
+                files["current-reading.json"] = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode()
+                files["current-reading.md"] = self.markdown(record).encode()
+            manifest = {"format": "paper-reader-library", "version": 1, "createdAt": now(),
+                        "activeId": active, "documents": [item["id"] for item in documents],
+                        "files": {name: {"sha256": hashlib.sha256(payload).hexdigest(), "size": len(payload)}
+                                  for name, payload in files.items()}}
+            manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode()
+            if (len(manifest_bytes) > 1024 * 1024 or len(files) + 1 > 10000
+                    or sum(map(len, files.values())) + len(manifest_bytes) > 1024 * 1024 * 1024
+                    or any(len(payload) > (MAX_UPLOAD if name.endswith("original.pdf") else 64 * 1024 * 1024)
+                           for name, payload in files.items())):
+                raise InvalidRequest("阅读库超过可恢复的备份大小限制，请手动备份整个 data 文件夹。")
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("manifest.json", manifest_bytes)
+                for name, payload in files.items():
+                    archive.writestr(name, payload)
+            return output.getvalue()
 
     def import_pdf(self, payload, filename):
         if not payload.startswith(b"%PDF-"):
@@ -142,7 +314,7 @@ class Store:
         except Exception as error:
             raise InvalidRequest("PDF 无法读取，文件可能损坏") from error
         doc_id = hashlib.sha256(payload).hexdigest()
-        clean_name = Path(filename.replace("\\", "/")).name[:240] or "未命名论文.pdf"
+        clean_name = Path(filename.replace("\\", "/")).name[:240].strip() or "未命名论文.pdf"
         with self.lock:
             if (self.folder(doc_id) / "record.json").exists():
                 return self.save(self.read(doc_id), activate=True)
@@ -361,7 +533,7 @@ class ReaderServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "PaperReader/0.1"
+    server_version = "PaperReader/0.4.0"
 
     def log_message(self, fmt, *args):
         # Keep PDF names, selections, and notes out of access logs.
@@ -380,7 +552,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(filename))
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # A reloading/closing tab may disconnect after its keepalive
+                # position update was saved. Do not attempt a second response.
+                pass
 
     def json(self, value, status=200):
         self.send(json.dumps(value, ensure_ascii=False).encode(), status)
@@ -419,7 +596,17 @@ class Handler(BaseHTTPRequestHandler):
             route = self.route()
             store = self.server.store
             if route == ["api", "session"]:
-                return self.json({"token": self.server.csrf, "documents": store.list(), "activeId": store.active()})
+                with store.lock:
+                    documents, warnings = store.catalog()
+                    valid_ids = {item["id"] for item in documents}
+                    active_id = store.active()
+                    return self.json({"token": self.server.csrf, "version": "0.4.0", "documents": documents,
+                                      "activeId": active_id if active_id in valid_ids else None,
+                                      "warnings": warnings,
+                                      "assistantFiles": {doc_id: store.assistant_files(doc_id) for doc_id in valid_ids}})
+            if route == ["api", "library", "backup"]:
+                return self.send(store.backup(), content_type="application/zip",
+                                 filename="paper-reader-library-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + ".zip")
             if route[:2] == ["api", "documents"] and len(route) == 4:
                 doc_id, operation = route[2:]
                 if operation == "record":
@@ -475,7 +662,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise InvalidRequest("记录格式无效")
             if self.command == "POST" and operation == "activate":
-                return self.json(store.save(store.read(doc_id), activate=True))
+                return self.json(store.activate(doc_id))
             if self.command == "POST" and operation == "highlights" and len(route) == 4:
                 return self.json(store.add_highlight(doc_id, body), 201)
             if self.command == "PATCH" and operation == "highlights" and len(route) == 5:
