@@ -74,6 +74,13 @@ async function scrollTextTarget(span,fragment) {
   // correctly dismiss a selection menu that the test has only just reopened.
   await settledReaderScroll(()=>span.scrollIntoViewIfNeeded(),{label:`text target: ${fragment}`});
 }
+async function clearSelectionWithMouse() {
+  // Scrolling dismisses the menu but intentionally retains the text selection.
+  // A second mouse-down inside it can start native drag-and-drop on Linux.
+  // Begin each independent selection case from a real click in blank padding.
+  await page.locator('#reader-scroll').click({position:{x:5,y:5}});
+  await page.waitForFunction(()=>getSelection().isCollapsed);
+}
 async function dragSpan(fragment) {
   const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await scrollTextTarget(span,fragment);
   const box=await span.boundingBox();assert(box&&box.width>10,'Text layer must be selectable');
@@ -100,7 +107,7 @@ try {
     const log=(type,extra={})=>{events.push({at:Number(performance.now().toFixed(1)),type,...state(),...extra});if(events.length>120)events.shift();};
     window.readerTestDiagnostics={events,state,log};
     for(const type of ['scroll','scrollend'])document.addEventListener(type,event=>{if(event.target.id==='reader-scroll')log(type);},{capture:true,passive:true});
-    for(const type of ['pointerdown','pointerup'])document.addEventListener(type,event=>log(type,{target:event.target.id||event.target.tagName,targetText:event.target.textContent?.slice(0,90),x:event.clientX,y:event.clientY}),true);
+    for(const type of ['pointerdown','pointerup','dragstart','dragend'])document.addEventListener(type,event=>log(type,{target:event.target.id||event.target.tagName,targetText:event.target.textContent?.slice(0,90),x:event.clientX,y:event.clientY}),true);
     document.addEventListener('selectionchange',()=>log('selectionchange'));
     document.addEventListener('DOMContentLoaded',()=>{const menu=document.querySelector('#selection-menu');if(menu)new MutationObserver(()=>log('menu:hidden-changed')).observe(menu,{attributes:true,attributeFilter:['hidden']});});
   });
@@ -167,8 +174,8 @@ try {
     // Use the browser selection API to exercise a range canceled outside our menu handlers.
     await dragWord('nearby');await popup.waitFor({state:'visible'});await page.evaluate(()=>window.getSelection().removeAllRanges());await popup.waitFor({state:'hidden'});
     await dragWord('nearby');await popup.waitFor({state:'visible'});await wheelReaderUntilSettled(170);await popup.waitFor({state:'hidden'});
-    await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#cancel-selection');await popup.waitFor({state:'hidden'});
-    await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#copy-selection');await popup.waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'nearby');
+    await clearSelectionWithMouse();await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#cancel-selection');await popup.waitFor({state:'hidden'});
+    await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await clearSelectionWithMouse();await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#copy-selection');await popup.waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'nearby');
     assert.equal(await count(),2);await page.click('#highlight-toggle');
   });
   await record('seven colors, underline, strikeout, restyling, zoom, and portable export',async()=>{

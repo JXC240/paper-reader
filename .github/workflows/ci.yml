@@ -114,6 +114,7 @@ jobs:
           path: |
             test-results/browser.log
             test-results/browser-results.json
+            test-results/browser-failure-trace.zip
             test-results/failure-private.png
           if-no-files-found: ignore
           retention-days: 7
