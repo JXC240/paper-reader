@@ -42,6 +42,26 @@ async function chooseSearchResult(index) {
 async function paneAnchor() { return page.evaluate(()=>{const reader=document.querySelector('#reader-scroll'),r=reader.getBoundingClientRect(),p=document.querySelector('#pdf-page').getBoundingClientRect();return {x:(r.left+reader.clientWidth/2-p.left)/p.width,y:(r.top+reader.clientHeight/2-p.top)/p.height};}); }
 async function count() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()).highlights.length; }
 async function activeRecord() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()); }
+async function wheelReaderUntilSettled(deltaY) {
+  const reader=page.locator('#reader-scroll');await reader.hover();
+  const before=await reader.evaluate(element=>element.scrollTop);
+  await reader.evaluate(element=>{
+    const start=element.scrollTop,state={moved:false,ended:false};
+    const moved=()=>{state.moved ||= Math.abs(element.scrollTop-start)>.5;};
+    const ended=()=>{moved();if(state.moved){state.ended=true;cleanup();}};
+    const cleanup=()=>{element.removeEventListener('scroll',moved);element.removeEventListener('scrollend',ended);};
+    element.readerWheelTest={state,cleanup};
+    element.addEventListener('scroll',moved);element.addEventListener('scrollend',ended);
+  });
+  try {
+    // wheel() dispatches input without waiting for compositor scrolling. Hiding the
+    // menu proves only that scrolling started, not that it is safe to select again.
+    await page.mouse.wheel(0,deltaY);
+    await page.waitForFunction(()=>document.querySelector('#reader-scroll').readerWheelTest?.state.ended);
+    const after=await reader.evaluate(element=>element.scrollTop);
+    assert((after-before)*Math.sign(deltaY)>.5,'The wheel must actually move the PDF pane before reaching scrollend');
+  } finally {await reader.evaluate(element=>{element.readerWheelTest?.cleanup();delete element.readerWheelTest;});}
+}
 async function dragSpan(fragment) {
   const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await span.scrollIntoViewIfNeeded();
   const box=await span.boundingBox();assert(box&&box.width>10,'Text layer must be selectable');
@@ -123,7 +143,7 @@ try {
     // Chromium does not consistently collapse non-editable PDF selections with ArrowLeft.
     // Use the browser selection API to exercise a range canceled outside our menu handlers.
     await dragWord('nearby');await popup.waitFor({state:'visible'});await page.evaluate(()=>window.getSelection().removeAllRanges());await popup.waitFor({state:'hidden'});
-    await dragWord('nearby');await popup.waitFor({state:'visible'});await page.locator('#reader-scroll').hover();await page.mouse.wheel(0,170);await popup.waitFor({state:'hidden'});
+    await dragWord('nearby');await popup.waitFor({state:'visible'});await wheelReaderUntilSettled(170);await popup.waitFor({state:'hidden'});
     await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#cancel-selection');await popup.waitFor({state:'hidden'});
     await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#copy-selection');await popup.waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'nearby');
     assert.equal(await count(),2);await page.click('#highlight-toggle');

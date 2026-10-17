@@ -178,6 +178,8 @@ README增加五个可复制模板：安装、内置浏览器并排打开、整�
 
 新增[Tests工作流](../.github/workflows/ci.yml)：Ubuntu24.04与macOS15 × Python3.10／3.13，另有Node22搜索、Linux bundled Chromium浏览器检查。动作以核对过的提交哈希固定，仓库权限只读；失败仅上传合成测试报告。实际线上结果见[Actions](https://github.com/JXC240/paper-reader/actions/workflows/ci.yml)，与本机结果分开判断。
 
+首次线上运行中，四组Python与搜索通过；Linux浏览器在滚动取消选文后的下一次拖选超时。检查发现 `mouse.wheel` 返回并不表示滚动已结束，测试只等待菜单第一次隐藏，后续滚动仍会收起下一次菜单。测试改为等待真实阅读区位移及原生 `scrollend` 后继续拖选，保持原有取消选文检查；不使用盲目延时、重试或移除断言绕过问题。该修正本机Chrome35项再次通过，后续线上结果按Actions中的具体提交判断。
+
 贡献、安全报告、问题与PR模板、Dependabot、开发／发布／升级／恢复指南为本轮新增基础设施。私密漏洞报告、分支保护及正式Release是独立仓库设置或发布动作，不因新增文件就声称已经启用。
 
 未验证Windows使用、真实长期睡眠／登录／重启、超长PDF与大规模标注性能、屏幕阅读器完整流程或英语学习效果。未新增连续滚动、OCR、跨页选文、多步撤销／重做、英文界面或自动AI／Obsidian同步。
