@@ -3,6 +3,8 @@
 /exports/
 /local-config.json
 /LOCAL_NOTES.md
+/paper-reader-library-*.zip
+/paper-reader-backup-*.zip
 /.local/
 .env
 .env.*

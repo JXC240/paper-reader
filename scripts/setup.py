@@ -5,17 +5,29 @@ import io
 import json
 from pathlib import Path
 import ssl
+import sys
 import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_ASSETS = (
+    "build/pdf.mjs", "build/pdf.worker.mjs", "web/pdf_viewer.css",
+    "cmaps/78-EUC-H.bcmap", "standard_fonts/FoxitDingbats.pfb",
+    "wasm/jbig2.wasm", "wasm/openjpeg.wasm", "wasm/qcms_bg.wasm", "LICENSE",
+)
+
+
+def assets_ready(target):
+    """A version marker alone cannot prove a copied/partial installation works."""
+    return all((target / name).is_file() and (target / name).stat().st_size > 0
+               for name in REQUIRED_ASSETS)
 
 
 def main():
     spec = json.loads((ROOT / "assets-lock.json").read_text())["pdfjs-dist"]
     target = ROOT / "vendor" / "pdfjs"
     marker = target / ".version"
-    if marker.exists() and marker.read_text().strip() == spec["version"]:
+    if marker.exists() and marker.read_text().strip() == spec["version"] and assets_ready(target):
         print("PDF.js assets already installed:", spec["version"])
         return
     print("Downloading pinned PDF.js assets:", spec["version"])
@@ -42,9 +54,16 @@ def main():
             destination.parent.mkdir(parents=True, exist_ok=True)
             with archive.extractfile(member) as source:
                 destination.write_bytes(source.read())
+    if not assets_ready(target):
+        raise RuntimeError("PDF.js archive is missing required assets; installation was not accepted")
     marker.write_text(spec["version"] + "\n")
     print("PDF.js assets verified and ready.")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, tarfile.TarError) as error:
+        print(f"PDF.js 安装失败 / installation failed: {error}", file=sys.stderr)
+        print("请检查网络后重试；保留 data/。Check the connection and retry; keep data/ unchanged.", file=sys.stderr)
+        sys.exit(1)

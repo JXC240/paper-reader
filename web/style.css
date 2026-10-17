@@ -22,8 +22,12 @@ button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-vis
 .save-status { font-size:12px; color:var(--muted); }
 .save-status.saved::before { content:""; display:inline-block; width:6px; height:6px; margin-right:6px; border-radius:50%; background:#4d9078; }
 .save-status.failed { color:#b64c38; }
-.help-panel { padding:18px 27px; border-bottom:1px solid var(--line); background:#edf3e9; line-height:1.8; }
+.help-panel { padding:18px 27px; border-bottom:1px solid var(--line); background:#edf3e9; line-height:1.8; max-height:45dvh; overflow:auto; }
 .help-panel p { margin:6px 0; max-width:950px; }
+.help-footnote { font-size:12px; color:#53685e; }
+.shortcut-guide { display:flex; flex-wrap:wrap; gap:8px 20px; margin:12px 0; max-width:1050px; font-size:12px; }
+.shortcut-guide span { white-space:nowrap; }
+kbd { display:inline-block; padding:0 5px; border:1px solid #cbd5c7; border-bottom-width:2px; border-radius:4px; background:#fffefa; font:11px -apple-system,BlinkMacSystemFont,sans-serif; }
 code { font-size:12px; overflow-wrap:anywhere; }
 .error-banner { padding:12px 24px; background:#fff0e9; border-bottom:1px solid #e6b8a5; color:#8c3c27; display:flex; align-items:center; gap:10px; }
 #error-text { flex:1; }
@@ -35,10 +39,17 @@ code { font-size:12px; overflow-wrap:anywhere; }
 .empty-illustration span { display:block; height:6px; margin:10px 0; background:#e1e5db; }
 .empty-illustration span:nth-child(2) { background:#f5d86e; width:90%; }
 .empty-actions { display:flex; justify-content:center; gap:10px; margin-top:28px; }
+.first-read-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:20px; list-style:none; padding:0; margin:32px 0 0; text-align:left; counter-reset:reading-step; }
+.first-read-steps li { border-top:1px solid #d7dfd2; padding-top:12px; counter-increment:reading-step; }
+.first-read-steps strong { display:block; font-size:12px; font-weight:600; margin-bottom:7px; }
+.first-read-steps strong::before { content:counter(reading-step) ". "; color:var(--accent); }
+.first-read-steps span { display:block; font-size:11px; line-height:1.7; color:var(--muted); }
 .recent-documents { margin-top:35px; display:grid; gap:8px; text-align:left; }
 .recent-documents button { white-space:normal; text-align:left; }
 .document-bar { display:flex; align-items:center; justify-content:space-between; padding:17px 24px 13px; gap:14px; background:var(--paper); }
 .document-title { min-width:0; }
+.document-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.document-actions button { font-size:11px; }
 .document-title h1 { font-size:15px; margin:5px 0 0; font-weight:500; max-width:700px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #document-picker { max-width:170px; font-size:12px; }
 .toolbar { padding:10px 24px; display:flex; flex-wrap:wrap; align-items:center; gap:12px; border-block:1px solid var(--line); background:#fbfcf6; position:relative; z-index:5; }
@@ -61,6 +72,7 @@ code { font-size:12px; overflow-wrap:anywhere; }
 .reader-layout { display:grid; grid-template-columns:minmax(0,1fr) 300px; flex:1; min-height:350px; position:relative; }
 .reader-layout.sidebar-hidden { grid-template-columns:minmax(0,1fr); }
 .reader-scroll { overflow:auto; background:#eaede6; padding:24px; position:relative; outline:none; }
+.reader-scroll:focus-visible { outline:3px solid #e6c663; outline-offset:-3px; }
 .pdf-page { position:relative; background:white; margin:0 auto; box-shadow:0 3px 20px #273e3417; overflow:hidden; --scale-factor:1; --user-unit:1; --total-scale-factor:1; }
 #pdf-canvas { display:block; }
 .textLayer { z-index:3; --min-font-size:1; }
@@ -82,6 +94,8 @@ code { font-size:12px; overflow-wrap:anywhere; }
 .sidebar-heading h2 { margin:6px 0; font-size:20px; font-weight:500; font-family:Georgia,"Songti SC",serif; }
 .sidebar-heading button { font-size:21px; padding:0 6px; border:0; }
 .sidebar-hint { color:var(--muted); font-size:11px; line-height:1.7; margin:8px 0 17px; }
+.draft-status { background:#fff4d6; border:1px solid #ead49a; border-radius:6px; padding:8px 10px; color:#775b17; font-size:11px; line-height:1.6; }
+.note-draft-hint { color:#876319; font-size:10px; line-height:1.6; margin:4px 0 8px; }
 .sidebar-tabs { display:flex; gap:4px; margin:14px 0; border-bottom:1px solid var(--line); padding-bottom:8px; }
 .sidebar-tabs button { flex:1; font-size:11px; padding:7px 4px; }
 .sidebar-tabs [aria-selected="true"] { color:var(--accent); background:#edf3e9; border-color:#c7d8c8; }
@@ -129,4 +143,4 @@ code { font-size:12px; overflow-wrap:anywhere; }
 .selection-menu button { font-size:12px; }
 #cancel-selection { padding-inline:8px; }
 @media(max-width:950px) { .reader-layout { grid-template-columns:minmax(0,1fr); } .sidebar { position:absolute; right:0; top:0; bottom:0; width:300px; z-index:10; box-shadow:-6px 0 30px #253a3415; } .reader-scroll { padding:18px; } .app-header { padding:14px 18px; } .document-bar { padding-inline:18px; } .toolbar { padding-inline:18px; gap:8px; } }
-@media(max-width:570px) { .brand { font-size:19px; } .brand-icon { display:none; } .brand small { font-size:9px; letter-spacing:0; } .header-actions { gap:6px; } .save-status { max-width:95px; font-size:10px; } .document-bar { padding:12px; } #document-picker { max-width:85px; } .toolbar { padding:8px; gap:7px; } .reader-scroll { padding:12px; } .page-footer { font-size:9px; flex-direction:column; } .empty-state h1 { font-size:29px; } .empty-state { padding-top:50px; } }
+@media(max-width:570px) { .brand { font-size:19px; } .brand-icon { display:none; } .brand small { font-size:9px; letter-spacing:0; } .header-actions { gap:6px; } .header-actions button { padding:7px 8px; font-size:11px; } .save-status { max-width:75px; font-size:10px; } .document-bar { padding:12px; } .document-actions { gap:4px; } .document-actions button { padding:7px 5px; font-size:10px; } #document-picker { max-width:85px; } .toolbar { padding:8px; gap:7px; } .reader-scroll { padding:12px; } .page-footer { font-size:9px; flex-direction:column; } .empty-state h1 { font-size:29px; } .empty-state { padding-top:35px; } .first-read-steps { gap:12px; } }

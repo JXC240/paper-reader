@@ -14,19 +14,20 @@
     <a class="brand" href="/" aria-label="Paper Reader 首页"><span class="brand-icon" aria-hidden="true">▤</span><span>Paper Reader<small>论文伴读 · 本机工作空间</small></span></a>
     <div class="header-actions">
       <span id="save-status" class="save-status" role="status">正在连接…</span>
-      <button id="help-toggle" class="quiet" aria-label="使用说明">?</button>
+      <button id="backup-library" class="quiet" title="下载包含原文、标注和已保存笔记的完整备份；浏览器草稿不在备份中">备份阅读库</button>
+      <button id="help-toggle" class="quiet" aria-label="使用说明与快捷键" aria-controls="help" aria-expanded="false" title="使用说明与快捷键（?）">?</button>
       <button id="open-file" class="primary">打开 PDF</button>
       <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
     </div>
   </header>
 
-  <section id="help" class="help-panel" hidden>
-    <strong>在右边阅读，在聊天里理解。</strong>
-    <p>打开 PDF → 选中文字标黄 → 回到聊天说“讲一下刚标黄的句子”。高亮会保存在本机。助手可读取项目下的 <code>data/current-reading.json</code>，也可以使用“复制阅读卡点”。</p>
-    <p>高亮默认表示整句理解卡点；只有点击“收为生词”才会进入导出笔记的生词分类。原 PDF 已有批注会显示并保留，列表记录本工具新增的高亮。导出的 Markdown 可在 Obsidian 中打开。扫描页暂不支持自动识字，双栏和公式请结合原文核对。</p>
-    <p>缩放框可输入 25%—400% 的比例，按回车确认；也可用 − / + 按钮。⌘ / Ctrl 加 + 或 − 缩放，⌘ / Ctrl 加 0 适合宽度（需阅读页面获得焦点）。取消选文、点空白、滚动或按 Esc 可收起选文菜单。</p>
-    <p>先选“高亮／下划线／删除线”和颜色，再拖选文字。连续标记开启时自动保存，选文模式则需点击“标记这段”。已有标注可在右侧卡片中换颜色或样式；删除线只画线，不会删除PDF原文。</p>
-    <p>“搜索”可查找整篇论文的文字（⌘ / Ctrl F），点击结果回到原文；搜索框内 Enter / Shift Enter 切换结果。搜索框只是临时提示，不会新增标注。“导航”提供 PDF 自带目录与页面书签；☆ 可收藏当前页。页码、比例和页内阅读位置会保存在本机。</p>
+  <section id="help" class="help-panel" aria-label="使用说明与快捷键" hidden>
+    <strong>先自己读，再带着具体问题找 AI。</strong>
+    <p>① 打开论文、标记卡点 → ② 点击“复制阅读卡点”，粘贴到聊天 → ③ 核对解释，按需保存笔记。每篇论文有自己的“复制论文链接”，可在不同聊天中固定打开；链接仅在运行本阅读库的电脑上可用。</p>
+    <p>标注会自动保存到本机。笔记需点击“保存笔记”才写入阅读库；未保存草稿会暂存于当前浏览器，清除浏览器数据后可能丢失。“备份阅读库”下载原文与已保存记录；“导出 Markdown”可用于 Obsidian。</p>
+    <div class="shortcut-guide"><span><kbd>←</kbd> <kbd>→</kbd> / <kbd>Page Up</kbd> <kbd>Page Down</kbd> 翻页</span><span><kbd>Home</kbd> / <kbd>End</kbd> 首页 / 末页</span><span><kbd>⌘ / Ctrl F</kbd> 全文搜索</span><span><kbd>⌘ / Ctrl +</kbd> <kbd>−</kbd> 缩放</span><span><kbd>⌘ / Ctrl 0</kbd> 适合宽度</span><span><kbd>Esc</kbd> 收起选文、搜索或说明</span></div>
+    <p class="help-footnote">翻页快捷键需先点击论文区域，输入笔记时不会翻页。缩放框可输入 25%—400%；搜索框内 Enter / Shift Enter 切换结果。按 ? 打开或关闭本说明。</p>
+    <details><summary>标注与阅读的注意事项</summary><p>先选高亮／下划线／删除线和颜色，再拖选文字。连续标记自动保存，选文模式需点击菜单确认。删除线只是读者标记，不删除原文。只有“收为生词”才会进入生词分类。扫描页暂不支持 OCR；双栏、公式和附近原文请回看 PDF 核对。原 PDF 已有批注会保留，右侧列表记录本工具新增的标注。</p></details>
   </section>
 
   <div id="error-banner" class="error-banner" role="alert" hidden><span id="error-text"></span><button id="retry-save" hidden>重试保存</button><button id="dismiss-error" aria-label="关闭错误提示">×</button></div>
@@ -36,15 +37,16 @@
       <div class="empty-illustration" aria-hidden="true"><span></span><span></span><span></span></div>
       <p class="eyebrow">READ AT YOUR OWN PACE</p>
       <h1>把没读懂的地方，<br>留给下一次对话。</h1>
-      <p>选中就标黄，关闭后也保留。<br>带着原文和页码，一句一句读下去。</p>
+      <p>先读原文，标记卡点，再带着上下文与 AI 讨论。<br>论文、标注和已保存笔记留在你的电脑里。</p>
       <div class="empty-actions"><button id="empty-open" class="primary">打开我的论文</button><button id="open-demo">试试示例 PDF</button></div>
+      <ol class="first-read-steps"><li><strong>自己读</strong><span>打开论文，先形成自己的理解。</span></li><li><strong>标记卡点</strong><span>选中文字即可标注，原 PDF 保持不变。</span></li><li><strong>带着问题讨论</strong><span>复制原文和页码到聊天，再回原文核对。</span></li></ol>
       <div id="recent-documents" class="recent-documents"></div>
     </section>
 
     <section id="workspace" class="workspace" hidden>
-      <div class="document-bar"><div class="document-title"><span class="eyebrow">正在阅读</span><h1 id="document-name"></h1></div><select id="document-picker" aria-label="切换论文"></select></div>
+      <div class="document-bar"><div class="document-title"><span class="eyebrow">正在阅读</span><h1 id="document-name"></h1></div><div class="document-actions"><button id="copy-document-link" class="quiet" title="复制这篇论文的固定本机链接，可在另一个聊天中打开">复制论文链接</button><select id="document-picker" aria-label="切换论文"></select></div></div>
       <div class="toolbar" role="toolbar" aria-label="PDF 阅读工具">
-        <div class="tool-group pagination"><button id="previous-page" aria-label="上一页">‹</button><label><input id="page-number" type="number" min="1" aria-label="页码"> <span id="page-count"></span></label><button id="next-page" aria-label="下一页">›</button></div>
+        <div class="tool-group pagination"><button id="previous-page" aria-label="上一页" title="上一页（← / Page Up，论文区域获得焦点时）">‹</button><label><input id="page-number" type="number" min="1" aria-label="页码"> <span id="page-count"></span></label><button id="next-page" aria-label="下一页" title="下一页（→ / Page Down，论文区域获得焦点时）">›</button></div>
         <div class="tool-group zoom-tools" role="group" aria-label="页面缩放"><button id="zoom-out" aria-label="缩小" title="缩小 10 个百分点（⌘ / Ctrl −）">−</button><input id="zoom" type="text" inputmode="decimal" aria-label="缩放百分比" title="输入 25%—400%，按回车确认" autocomplete="off" spellcheck="false"><button id="zoom-in" aria-label="放大" title="放大 10 个百分点（⌘ / Ctrl +）">+</button><button id="zoom-fit" aria-pressed="true" title="适合宽度（⌘ / Ctrl 0）">适合宽度</button></div>
         <div class="tool-group navigation-tools"><button id="navigation-toggle" aria-label="打开目录与书签">导航</button><button id="search-toggle" title="全文搜索（⌘ / Ctrl F）">搜索</button><button id="bookmark-toggle" aria-pressed="false" title="收藏当前页">☆ 书签</button></div>
         <div class="tool-group highlight-tools"><button id="highlight-toggle" class="toggle active" aria-pressed="true">▰ 连续标记</button><select id="highlight-style" aria-label="标注方式"><option value="highlight">高亮</option><option value="underline">下划线</option><option value="strikeout">删除线</option></select><select id="highlight-color" aria-label="标注颜色"><option value="yellow">黄色</option><option value="green">绿色</option><option value="pink">粉色</option><option value="blue">蓝色</option><option value="purple">紫色</option><option value="orange">橙色</option><option value="red">红色</option></select><button id="undo" class="quiet" disabled title="撤销最近一次标注或删除（⌘Z）">撤销</button></div>
@@ -67,6 +69,7 @@
           <div class="sidebar-tabs" role="tablist" aria-label="阅读侧栏功能"><button id="notes-tab" role="tab" aria-selected="true" aria-controls="notes-panel">标注</button><button id="navigation-tab" role="tab" aria-selected="false" aria-controls="navigation-panel" tabindex="-1">目录·书签</button><button id="search-tab" role="tab" aria-selected="false" aria-controls="search-panel" tabindex="-1">搜索</button></div>
           <section id="notes-panel" role="tabpanel" aria-labelledby="notes-tab">
           <p class="sidebar-hint">标黄就够了，讲解时再回到完整句子。</p>
+          <p id="draft-status" class="draft-status" role="status" aria-live="polite" hidden></p>
           <div class="export-actions"><button id="copy-all">复制阅读卡点</button><button id="export-markdown">导出 Markdown</button><button id="export-pdf">导出批注 PDF</button></div>
           <label class="filter-label">查看<select id="highlight-filter"><option value="all">全部标注</option><option value="page">当前页</option><option value="vocabulary">确认的生词</option></select></label>
           <div id="highlight-list" class="highlight-list"></div>

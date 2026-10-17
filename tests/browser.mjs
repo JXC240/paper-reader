@@ -15,14 +15,14 @@ const output = path.join(root, 'test-results');
 await fs.mkdir(output, {recursive:true});
 const python = process.env.PAPER_READER_PYTHON || path.join(root,'.venv/bin/python');
 const results = [], consoleErrors = [];
-let service, browser, base, browserContext, page;
+let service, browser, base, browserContext, page, activeCheck, tracingStarted=false;
 
 async function startServer(port = 0) {
   service = spawn(python, ['server.py', '--port',String(port),'--data-dir',dataDir], {cwd:root, stdio:['ignore','pipe','pipe']});
   base = await new Promise((resolve,reject)=>{let stdout='';const timeout=setTimeout(()=>reject(new Error('Server startup timeout')),15000);service.once('exit',code=>reject(new Error(`Server exited ${code}`)));service.stdout.on('data',chunk=>{stdout+=chunk;const match=stdout.match(/http:\/\/127\.0\.0\.1:\d+/);if(match){clearTimeout(timeout);resolve(match[0]);}});service.stderr.on('data',chunk=>process.stderr.write(chunk));});
 }
 async function stopServer() { const child=service;if(!child||child.exitCode!==null)return;await new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGTERM');}); }
-async function record(name, operation) { await operation(); results.push({name,passed:true});console.log('PASS',name); }
+async function record(name, operation) { activeCheck=name;await operation();results.push({name,passed:true});console.log('PASS',name); }
 async function saved() { await page.waitForFunction(()=>document.querySelector('#save-status').textContent==='已保存到本机'); }
 async function zoomRendered(value) {
   await page.waitForFunction(expected=>document.querySelector('#pdf-page').dataset.zoom===String(expected)&&document.querySelector('#page-loading').hidden,value);
@@ -42,18 +42,57 @@ async function chooseSearchResult(index) {
 async function paneAnchor() { return page.evaluate(()=>{const reader=document.querySelector('#reader-scroll'),r=reader.getBoundingClientRect(),p=document.querySelector('#pdf-page').getBoundingClientRect();return {x:(r.left+reader.clientWidth/2-p.left)/p.width,y:(r.top+reader.clientHeight/2-p.top)/p.height};}); }
 async function count() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()).highlights.length; }
 async function activeRecord() { const session=await(await fetch(base+'/api/session')).json();return (await(await fetch(base+`/api/documents/${session.activeId}/record`)).json()); }
+async function settledReaderScroll(operation, {requireMovement=false,label='scroll'}={}) {
+  const reader=page.locator('#reader-scroll');
+  await reader.evaluate(element=>{
+    const start={top:element.scrollTop,left:element.scrollLeft},state={moved:false,ended:false,start};
+    const moved=()=>{state.moved ||= Math.abs(element.scrollTop-start.top)>.5||Math.abs(element.scrollLeft-start.left)>.5;};
+    const ended=()=>{moved();if(state.moved){state.ended=true;cleanup();}};
+    const cleanup=()=>{element.removeEventListener('scroll',moved);element.removeEventListener('scrollend',ended);};
+    element.readerScrollTest={state,moved,cleanup};
+    element.addEventListener('scroll',moved);element.addEventListener('scrollend',ended);
+  });
+  try {
+    await page.evaluate(label=>window.readerTestDiagnostics?.log('scroll-operation:start',{label}),label);
+    await operation();
+    const moved=await reader.evaluate(element=>{element.readerScrollTest.moved();return element.readerScrollTest.state.moved;});
+    if(requireMovement||moved)await page.waitForFunction(()=>document.querySelector('#reader-scroll').readerScrollTest?.state.ended);
+    await page.evaluate(label=>window.readerTestDiagnostics?.log('scroll-operation:settled',{label}),label);
+  } finally {await reader.evaluate(element=>{element.readerScrollTest?.cleanup();delete element.readerScrollTest;});}
+}
+async function wheelReaderUntilSettled(deltaY) {
+  const reader=page.locator('#reader-scroll');await reader.hover();
+  const before=await reader.evaluate(element=>element.scrollTop);
+  // wheel() returns while compositor scrolling may still be in progress.
+  await settledReaderScroll(()=>page.mouse.wheel(0,deltaY),{requireMovement:true,label:`wheel ${deltaY}`});
+  const after=await reader.evaluate(element=>element.scrollTop);
+  assert((after-before)*Math.sign(deltaY)>.5,'The wheel must actually move the PDF pane before reaching scrollend');
+}
+async function scrollTextTarget(span,fragment) {
+  // Moving the text back into view after a wheel is a NEW scroll. It must finish
+  // before measuring coordinates or dragging, otherwise its late event can
+  // correctly dismiss a selection menu that the test has only just reopened.
+  await settledReaderScroll(()=>span.scrollIntoViewIfNeeded(),{label:`text target: ${fragment}`});
+}
+async function clearSelectionWithMouse() {
+  // Scrolling dismisses the menu but intentionally retains the text selection.
+  // A second mouse-down inside it can start native drag-and-drop on Linux.
+  // Begin each independent selection case from a real click in blank padding.
+  await page.locator('#reader-scroll').click({position:{x:5,y:5}});
+  await page.waitForFunction(()=>getSelection().isCollapsed);
+}
 async function dragSpan(fragment) {
-  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await span.scrollIntoViewIfNeeded();
+  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.waitFor();await scrollTextTarget(span,fragment);
   const box=await span.boundingBox();assert(box&&box.width>10,'Text layer must be selectable');
   await page.mouse.move(box.x+1,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width-1,box.y+box.height/2,{steps:12});await page.mouse.up();
 }
 async function dragAcross(firstText,lastText) {
   const first=page.locator('#text-layer span').filter({hasText:firstText}).first();const last=page.locator('#text-layer span').filter({hasText:lastText}).first();
-  await first.scrollIntoViewIfNeeded();const a=await first.boundingBox(),b=await last.boundingBox();
+  await scrollTextTarget(first,firstText);const a=await first.boundingBox(),b=await last.boundingBox();
   await page.mouse.move(a.x+1,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+b.width-1,b.y+b.height/2,{steps:18});await page.mouse.up();
 }
 async function dragWord(fragment) {
-  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await span.scrollIntoViewIfNeeded();
+  const span=page.locator('#text-layer span').filter({hasText:fragment}).first();await scrollTextTarget(span,fragment);
   const box=await span.evaluate((element,word)=>{const node=element.firstChild;const offset=node.textContent.indexOf(word);const range=document.createRange();range.setStart(node,offset);range.setEnd(node,offset+word.length);const r=range.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};},fragment);
   await page.mouse.move(box.x+.2,box.y+box.height/2);await page.mouse.down();await page.mouse.move(box.x+box.width-.2,box.y+box.height/2,{steps:12});await page.mouse.up();
 }
@@ -62,6 +101,17 @@ try {
   await startServer();
   browser=await chromium.launch({headless:true,...(process.env.PAPER_READER_BROWSER_CHANNEL&&process.env.PAPER_READER_BROWSER_CHANNEL!=='bundled'?{channel:process.env.PAPER_READER_BROWSER_CHANNEL}:{})});
   browserContext=await browser.newContext({viewport:{width:1280,height:900},acceptDownloads:true});
+  await browserContext.addInitScript(()=>{
+    const events=[];
+    const state=()=>{const reader=document.querySelector('#reader-scroll'),menu=document.querySelector('#selection-menu'),selection=getSelection();return {top:reader?.scrollTop,left:reader?.scrollLeft,menuHidden:menu?.hidden,selection:selection?.toString(),collapsed:selection?.isCollapsed};};
+    const log=(type,extra={})=>{events.push({at:Number(performance.now().toFixed(1)),type,...state(),...extra});if(events.length>120)events.shift();};
+    window.readerTestDiagnostics={events,state,log};
+    for(const type of ['scroll','scrollend'])document.addEventListener(type,event=>{if(event.target.id==='reader-scroll')log(type);},{capture:true,passive:true});
+    for(const type of ['pointerdown','pointerup','dragstart','dragend'])document.addEventListener(type,event=>log(type,{target:event.target.id||event.target.tagName,targetText:event.target.textContent?.slice(0,90),x:event.clientX,y:event.clientY}),true);
+    document.addEventListener('selectionchange',()=>log('selectionchange'));
+    document.addEventListener('DOMContentLoaded',()=>{const menu=document.querySelector('#selection-menu');if(menu)new MutationObserver(()=>log('menu:hidden-changed')).observe(menu,{attributes:true,attributeFilter:['hidden']});});
+  });
+  await browserContext.tracing.start({screenshots:true,snapshots:true,sources:true});tracingStarted=true;
   page=await browserContext.newPage();page.on('pageerror',err=>consoleErrors.push(err.message));
   await record('empty library and original demo import',async()=>{
     await page.goto(base);await page.locator('#empty-state').waitFor({state:'visible'});await page.click('#open-demo');await page.locator('#text-layer span').first().waitFor();await saved();
@@ -123,9 +173,9 @@ try {
     // Chromium does not consistently collapse non-editable PDF selections with ArrowLeft.
     // Use the browser selection API to exercise a range canceled outside our menu handlers.
     await dragWord('nearby');await popup.waitFor({state:'visible'});await page.evaluate(()=>window.getSelection().removeAllRanges());await popup.waitFor({state:'hidden'});
-    await dragWord('nearby');await popup.waitFor({state:'visible'});await page.locator('#reader-scroll').hover();await page.mouse.wheel(0,170);await popup.waitFor({state:'hidden'});
-    await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#cancel-selection');await popup.waitFor({state:'hidden'});
-    await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#copy-selection');await popup.waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'nearby');
+    await dragWord('nearby');await popup.waitFor({state:'visible'});await wheelReaderUntilSettled(170);await popup.waitFor({state:'hidden'});
+    await clearSelectionWithMouse();await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#cancel-selection');await popup.waitFor({state:'hidden'});
+    await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await clearSelectionWithMouse();await dragWord('nearby');await popup.waitFor({state:'visible'});await page.click('#copy-selection');await popup.waitFor({state:'hidden'});assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),'nearby');
     assert.equal(await count(),2);await page.click('#highlight-toggle');
   });
   await record('seven colors, underline, strikeout, restyling, zoom, and portable export',async()=>{
@@ -151,13 +201,65 @@ try {
     const card=page.locator('.highlight-card').last();await card.getByRole('button',{name:'收为生词'}).click();await saved();
     const updated=page.locator('.highlight-card').last();await updated.locator('summary').click();await updated.locator('textarea').fill('读者确认的测试笔记。');await updated.getByRole('button',{name:'保存笔记'}).click();await saved();const last=(await activeRecord()).highlights.at(-1);assert.equal(last.kind,'vocabulary');assert.equal(last.note,'读者确认的测试笔记。');
   });
+  await record('unsaved typed notes survive zoom, filtering, paging, reload, and document-scoped draft recovery',async()=>{
+    const original=(await activeRecord()).highlights.at(-1),card=page.locator(`.highlight-card[data-id="${original.id}"]`),draft='先自己理解：这是一条尚未保存的阅读草稿。';
+    await card.locator('summary').click();await card.locator('textarea').fill(draft);
+    await page.locator('#draft-status').waitFor({state:'visible'});assert.match(await card.locator('summary').textContent(),/尚未保存/);
+    await setZoom('125%',1.25);assert.equal(await card.locator('textarea').inputValue(),draft);
+    await page.selectOption('#highlight-filter','page');await page.click('#previous-page');await page.waitForFunction(()=>document.querySelector('#page-number').value==='1'&&document.querySelector('#page-loading').hidden);await saved();assert.equal(await card.count(),0);
+    await page.selectOption('#highlight-filter','all');assert.equal(await card.locator('textarea').inputValue(),draft);
+    assert.equal((await activeRecord()).highlights.find(h=>h.id===original.id).note,original.note,'A draft must not silently save an unconfirmed explanation');
+    assert(await page.evaluate(()=>{const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;}),'Unsaved drafts warn before leaving');
+    const accept=dialog=>dialog.accept();page.on('dialog',accept);
+    try { await page.reload();await saved(); } finally {page.off('dialog',accept);}
+    if(await page.locator('#sidebar').isHidden())await page.click('#sidebar-toggle');await page.locator('#notes-panel').waitFor({state:'visible'});
+    assert.equal(await card.locator('textarea').inputValue(),draft);assert(await card.locator('details').evaluate(e=>e.open));
+    await card.getByRole('button',{name:'保存笔记'}).click();await saved();assert.equal((await activeRecord()).highlights.find(h=>h.id===original.id).note,draft);assert(await page.locator('#draft-status').isHidden());
+    await card.locator('summary').click();await card.locator('textarea').fill(original.note);await card.getByRole('button',{name:'保存笔记'}).click();await saved();
+    await page.click('#next-page');await page.waitForFunction(()=>document.querySelector('#page-number').value==='2'&&document.querySelector('#page-loading').hidden);await saved();await page.click('#zoom-fit');await zoomRendered('fit');
+  });
+  await record('finishing an older note save preserves text typed while that save is in flight',async()=>{
+    const original=(await activeRecord()).highlights.at(-1),card=page.locator(`.highlight-card[data-id="${original.id}"]`),url=base+`/api/documents/${(await activeRecord()).id}/highlights/${original.id}`;
+    let release,entered;const wait=new Promise(resolve=>{release=resolve;}),started=new Promise(resolve=>{entered=resolve;});
+    await page.route(url,async route=>{if(route.request().method()==='PATCH'){entered();await wait;}await route.continue();});
+    try {
+      await card.locator('summary').click();await card.locator('textarea').fill('第一版：点击保存时的内容。');await card.getByRole('button',{name:'保存笔记'}).click();await started;
+      await card.locator('textarea').fill('第二版：保存过程中继续输入的内容。');release();await saved();
+      assert.equal((await activeRecord()).highlights.find(h=>h.id===original.id).note,'第一版：点击保存时的内容。');
+      assert.equal(await card.locator('textarea').inputValue(),'第二版：保存过程中继续输入的内容。');assert(await page.locator('#draft-status').isVisible());
+    } finally {release();await page.unroute(url);}
+    await card.locator('textarea').fill(original.note);await card.getByRole('button',{name:'保存笔记'}).click();await saved();assert(await page.locator('#draft-status').isHidden());
+  });
+  await record('failed note saves retain drafts and retry the explicit saved text',async()=>{
+    const original=(await activeRecord()).highlights.at(-1),card=page.locator(`.highlight-card[data-id="${original.id}"]`),url=base+`/api/documents/${(await activeRecord()).id}/highlights/${original.id}`,draft='网络失败时也必须保留的阅读草稿。';
+    await page.route(url,route=>route.abort());
+    try {
+      await card.locator('summary').click();await card.locator('textarea').fill(draft);await card.getByRole('button',{name:'保存笔记'}).click();await page.locator('#retry-save').waitFor({state:'visible'});
+      assert.equal(await card.locator('textarea').inputValue(),draft);assert.equal((await activeRecord()).highlights.find(h=>h.id===original.id).note,original.note);assert(await page.locator('#draft-status').isVisible());
+    } finally {await page.unroute(url);}
+    await page.click('#retry-save');await saved();assert.equal((await activeRecord()).highlights.find(h=>h.id===original.id).note,draft);assert(await page.locator('#draft-status').isHidden());
+    await card.locator('summary').click();await card.locator('textarea').fill(original.note);await card.getByRole('button',{name:'保存笔记'}).click();await saved();
+  });
+  await record('blocked browser draft storage warns clearly and still protects text through rerenders',async()=>{
+    const original=(await activeRecord()).highlights.at(-1),card=page.locator(`.highlight-card[data-id="${original.id}"]`),draft='浏览器暂存被禁用时，当前页面内仍要保留。';
+    await page.evaluate(()=>{window.readerTestStorageSetItem=Storage.prototype.setItem;Storage.prototype.setItem=function(){throw new DOMException('Test quota failure','QuotaExceededError');};});
+    try {
+      await card.locator('summary').click();await card.locator('textarea').fill(draft);await page.locator('#error-banner').waitFor({state:'visible'});assert.match(await page.locator('#error-text').textContent(),/浏览器无法保存笔记草稿/);
+      await setZoom('125%',1.25);assert.equal(await card.locator('textarea').inputValue(),draft);assert.match(await page.locator('#draft-status').textContent(),/仅在当前页面/);
+    } finally {await page.evaluate(()=>{Storage.prototype.setItem=window.readerTestStorageSetItem;delete window.readerTestStorageSetItem;});}
+    await card.locator('textarea').fill(original.note);await card.getByRole('button',{name:'保存笔记'}).click();await saved();await page.click('#dismiss-error');await page.click('#zoom-fit');await zoomRendered('fit');
+  });
   await record('Markdown and standard annotated PDF downloads',async()=>{
     let promise=page.waitForEvent('download');await page.click('#export-markdown');let download=await promise;await download.saveAs(path.join(output,'demo-notes.md'));const markdown=await fs.readFile(path.join(output,'demo-notes.md'),'utf8');assert.match(markdown,/读者确认的生词/);assert.match(markdown,/读者确认的测试笔记/);
     promise=page.waitForEvent('download');await page.click('#export-pdf');download=await promise;await download.saveAs(path.join(output,'demo-annotated.pdf'));const bytes=await fs.readFile(path.join(output,'demo-annotated.pdf'));assert.equal(bytes.subarray(0,5).toString(),'%PDF-');
   });
   await record('copying reading notes produces full source context',async()=>{
     await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await page.click('#copy-all');await page.waitForFunction(()=>!document.querySelector('#toast').hidden&&document.querySelector('#toast').textContent.includes('已复制'));
-    const text=await page.evaluate(()=>navigator.clipboard.readText());assert.match(text,/PDF 第 2 页/);assert.match(text,/附近原文/);assert.match(text,/读者确认的测试笔记/);
+    const text=await page.evaluate(()=>navigator.clipboard.readText());assert.match(text,/PDF 第 2 页/);assert.match(text,/附近原文/);assert.match(text,/读者确认的测试笔记/);assert.match(text,/论文编号：[0-9a-f]{64}/);assert.match(text,/固定阅读链接：http:\/\/127\.0\.0\.1:\d+\/\?doc=[0-9a-f]{64}/);assert.match(text,/documents\/[0-9a-f]{64}\/record\.json/);
+  });
+  await record('library backup button downloads a portable archive',async()=>{
+    const promise=page.waitForEvent('download');await page.click('#backup-library');const backup=await promise;await backup.saveAs(path.join(output,'library-backup.zip'));
+    assert.match(backup.suggestedFilename(),/^paper-reader-backup-\d{4}-\d{2}-\d{2}\.zip$/);assert.equal((await fs.readFile(path.join(output,'library-backup.zip'))).subarray(0,2).toString(),'PK');
   });
   await record('delete and undo restore selected text',async()=>{
     const original=(await activeRecord()).highlights.at(-1).rawText;await page.locator('.highlight-card').last().getByRole('button',{name:'删除',exact:true}).click();await saved();assert.equal(await count(),1);await page.click('#undo');await saved();assert.equal(await count(),2);assert.equal((await activeRecord()).highlights.at(-1).rawText,original);
@@ -217,6 +319,32 @@ try {
     await page.locator('#outline-list button').filter({hasText:'Demo reading'}).click();await page.waitForFunction(()=>document.querySelector('#page-number').value==='1'&&document.querySelector('#page-loading').hidden);await saved();
     await page.selectOption('#document-picker',oldId);await page.waitForFunction(id=>document.querySelector('#document-picker').value===id&&!document.querySelector('#document-picker').disabled&&document.querySelector('#page-loading').hidden,oldId);await saved();assert.equal(await page.inputValue('#page-number'),'2');assert.equal(await count(),2);
     await page.click('#sidebar-toggle');await page.click('#zoom-fit');await zoomRendered('fit');
+  });
+  await record('fixed document links stay bound across chats and reject missing documents without fallback',async()=>{
+    const original=await activeRecord(),session=await(await fetch(base+'/api/session')).json(),other=session.documents.find(doc=>doc.id!==original.id);
+    assert(other,'The test library must contain a second PDF');assert.equal(new URL(page.url()).searchParams.get('doc'),original.id);
+    const card=page.locator(`.highlight-card[data-id="${original.highlights.at(-1).id}"]`),draft='只属于第一篇论文的未保存草稿。';
+    await card.locator('summary').click();await card.locator('textarea').fill(draft);
+    await page.selectOption('#document-picker',other.id);await saved();assert.equal(await page.locator('.highlight-card textarea').count(),0,'A draft must not leak into another PDF');
+    await page.selectOption('#document-picker',original.id);await saved();assert.equal(await card.locator('textarea').inputValue(),draft);
+    await card.locator('textarea').fill(original.highlights.at(-1).note||'');await card.getByRole('button',{name:'保存笔记'}).click();await saved();
+    await browserContext.grantPermissions(['clipboard-read','clipboard-write'],{origin:base});await page.click('#copy-document-link');assert.equal(new URL(await page.evaluate(()=>navigator.clipboard.readText())).searchParams.get('doc'),original.id);
+    const second=await browserContext.newPage();second.on('pageerror',err=>consoleErrors.push(err.message));
+    try {
+      await second.goto(base+'/?doc='+other.id);await second.waitForFunction(()=>document.querySelector('#save-status').textContent==='已保存到本机');assert.equal((await activeRecord()).id,other.id);
+      await page.reload();await saved();assert.equal(await page.inputValue('#document-picker'),original.id,'Reload honors its explicit document rather than the global active document');
+      assert.equal(await second.inputValue('#document-picker'),other.id);
+      const activeBefore=(await activeRecord()).id;
+      await second.goto(base+'/?doc='+'f'.repeat(64));await second.locator('#error-banner').waitFor({state:'visible'});assert(await second.locator('#workspace').isHidden());assert.match(await second.locator('#error-text').textContent(),/没有切换到其他论文/);assert.equal((await activeRecord()).id,activeBefore);
+    } finally {await second.close();}
+  });
+  await record('reading page shortcuts and keyboard help do not interrupt note editing',async()=>{
+    await page.locator('#reader-scroll').focus();await page.keyboard.press('Home');await page.waitForFunction(()=>document.querySelector('#page-number').value==='1'&&document.querySelector('#page-loading').hidden);await saved();
+    await page.keyboard.press('ArrowRight');await page.waitForFunction(()=>document.querySelector('#page-number').value==='2'&&document.querySelector('#page-loading').hidden);await saved();
+    await page.keyboard.press('PageUp');await page.waitForFunction(()=>document.querySelector('#page-number').value==='1'&&document.querySelector('#page-loading').hidden);await saved();
+    await page.keyboard.press('End');await page.waitForFunction(()=>document.querySelector('#page-number').value==='2'&&document.querySelector('#page-loading').hidden);await saved();
+    await page.keyboard.press('?');assert(await page.locator('#help').isVisible());assert.equal(await page.getAttribute('#help-toggle','aria-expanded'),'true');await page.keyboard.press('Escape');assert(await page.locator('#help').isHidden());assert.equal(await page.getAttribute('#help-toggle','aria-expanded'),'false');
+    const card=page.locator('.highlight-card').last();await card.locator('summary').click();await card.locator('textarea').focus();await page.keyboard.press('ArrowLeft');assert.equal(await page.inputValue('#page-number'),'2');await page.keyboard.press('PageUp');assert.equal(await page.inputValue('#page-number'),'2');
   });
   await record('empty text-layer notice and recovery after a failed PDF load',async()=>{
     const originalId=(await activeRecord()).id,fixture=path.join(output,'empty-text-layer.pdf');
@@ -349,6 +477,9 @@ try {
   console.log(`${results.length} browser checks passed. Artifacts: ${output}`);
 } catch(error) {
   if(page)await page.screenshot({path:path.join(output,'failure-private.png')}).catch(()=>{});
-  await fs.writeFile(path.join(output,'browser-results.json'),JSON.stringify({results,error:error.stack,consoleErrors,dataDir},null,2));
+  const diagnostics=await page?.evaluate(()=>({state:window.readerTestDiagnostics?.state(),events:window.readerTestDiagnostics?.events})).catch(()=>undefined);
+  if(diagnostics)console.error('BROWSER INTERACTION DIAGNOSTICS',JSON.stringify({activeCheck,...diagnostics},null,2));
+  if(tracingStarted){await browserContext.tracing.stop({path:path.join(output,'browser-failure-trace.zip')}).catch(()=>{});tracingStarted=false;}
+  await fs.writeFile(path.join(output,'browser-results.json'),JSON.stringify({results,activeCheck,error:error.stack,consoleErrors,dataDir,browserVersion:await browser?.version(),diagnostics},null,2));
   console.error(error);process.exitCode=1;
-} finally { if(browser)await browser.close();await stopServer(); }
+} finally { if(tracingStarted)await browserContext.tracing.stop().catch(()=>{});if(browser)await browser.close();await stopServer(); }
