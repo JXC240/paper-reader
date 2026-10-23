@@ -201,6 +201,36 @@ try {
     const card=page.locator('.highlight-card').last();await card.getByRole('button',{name:'收为生词'}).click();await saved();
     const updated=page.locator('.highlight-card').last();await updated.locator('summary').click();await updated.locator('textarea').fill('读者确认的测试笔记。');await updated.getByRole('button',{name:'保存笔记'}).click();await saved();const last=(await activeRecord()).highlights.at(-1);assert.equal(last.kind,'vocabulary');assert.equal(last.note,'读者确认的测试笔记。');
   });
+  for (const colorScheme of ['dark','light']) {
+    await record(`note editor stays readable and saves across reload with ${colorScheme} preference`,async()=>{
+      const original=(await activeRecord()).highlights.at(-1);
+      const card=page.locator(`.highlight-card[data-id="${original.id}"]`),note=card.locator('textarea');
+      const text=`${colorScheme} preference: 先理解完整句子，再核对笔记。`;
+      const assertNoteColors=async()=>{
+        const colors=await note.evaluate(element=>({
+          background:getComputedStyle(element).backgroundColor,
+          foreground:getComputedStyle(element).color,
+          scheme:getComputedStyle(document.documentElement).colorScheme,
+        }));
+        assert.equal(colors.background,'rgb(255, 254, 250)','The note field must keep its light reading surface');
+        assert.equal(colors.foreground,'rgb(36, 58, 54)','Entered notes must use readable body text, not muted hint text');
+        assert(!colors.scheme.split(/\s+/).includes('dark'),'PDF.js must not opt the reader into dark native controls');
+      };
+      await page.emulateMedia({colorScheme});
+      assert.equal(await page.evaluate(()=>matchMedia('(prefers-color-scheme: dark)').matches),colorScheme==='dark');
+      if(!await card.locator('details').evaluate(element=>element.open))await card.locator('summary').click();
+      await note.fill(text);await assertNoteColors();
+      await card.getByRole('button',{name:'保存笔记'}).click();await saved();
+      assert.equal((await activeRecord()).highlights.find(item=>item.id===original.id).note,text);
+      await page.reload();await saved();
+      await card.locator('summary').click();
+      assert.equal(await note.inputValue(),text);await assertNoteColors();
+      await note.scrollIntoViewIfNeeded();
+      await page.screenshot({path:path.join(output,`note-editor-${colorScheme}.png`)});
+      await note.fill(original.note);await card.getByRole('button',{name:'保存笔记'}).click();await saved();
+      await page.emulateMedia({colorScheme:null});
+    });
+  }
   await record('unsaved typed notes survive zoom, filtering, paging, reload, and document-scoped draft recovery',async()=>{
     const original=(await activeRecord()).highlights.at(-1),card=page.locator(`.highlight-card[data-id="${original.id}"]`),draft='先自己理解：这是一条尚未保存的阅读草稿。';
     await card.locator('summary').click();await card.locator('textarea').fill(draft);
