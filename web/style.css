@@ -1,4 +1,5 @@
-:root { --ink:#243a36; --muted:#74817b; --accent:#24665b; --line:#e3e7df; --paper:#fffefa; --surface:#f5f6f0; --radius:10px; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; color:var(--ink); background:var(--surface); font-size:14px; }
+/* Override PDF.js's global light/dark opt-in: this reader uses a light palette. */
+:root { --ink:#243a36; --muted:#74817b; --accent:#24665b; --line:#e3e7df; --paper:#fffefa; --surface:#f5f6f0; --radius:10px; color-scheme:only light; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif; color:var(--ink); background:var(--surface); font-size:14px; }
 * { box-sizing:border-box; }
 [hidden] { display:none !important; }
 body { margin:0; height:100dvh; display:flex; flex-direction:column; }
@@ -136,7 +137,7 @@ code { font-size:12px; overflow-wrap:anywhere; }
 .card-actions button { padding:4px 6px; font-size:10px; border-color:transparent; color:var(--muted); }
 .card-actions button:hover { background:#eef1e8; }
 .highlight-card details { margin-top:9px; color:var(--muted); font-size:11px; }
-.highlight-card textarea { display:block; width:100%; min-height:85px; resize:vertical; border:1px solid var(--line); border-radius:5px; padding:7px; margin:8px 0; font-size:12px; line-height:1.7; }
+.highlight-card textarea { display:block; width:100%; min-height:85px; resize:vertical; border:1px solid var(--line); border-radius:5px; padding:7px; margin:8px 0; background:var(--paper); color:var(--ink); font-size:12px; line-height:1.7; }
 .note-save { font-size:10px; padding:5px 8px; }
 .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); max-width:90%; background:#254b42; color:white; border-radius:9px; padding:12px 19px; font-size:12px; box-shadow:0 5px 20px #0002; z-index:30; }
 .selection-menu { position:fixed; z-index:20; display:flex; gap:5px; padding:5px; border-radius:9px; background:white; box-shadow:0 3px 18px #0002; }
