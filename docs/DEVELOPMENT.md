@@ -28,6 +28,7 @@ Search checks need Node.js, with no npm packages required:
 
 ```sh
 node --test tests/search.mjs
+node --test tests/clipboard.mjs
 ```
 
 For browser checks, use Node 22 and pnpm 10 (the CI configuration):

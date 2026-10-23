@@ -1,5 +1,6 @@
 import { getDocument, GlobalWorkerOptions, TextLayer } from '/vendor/pdfjs/build/pdf.mjs';
 import { buildPageText, findMatches } from './search.js';
+import { copyText } from './clipboard.js';
 
 GlobalWorkerOptions.workerSrc = '/vendor/pdfjs/build/pdf.worker.mjs';
 const $ = id => document.getElementById(id);
@@ -639,7 +640,11 @@ async function showSearchMatch(index) {
   $('search-layer').querySelector('.current')?.scrollIntoView({block:'center',inline:'nearest'});
   await savePosition();
 }
-async function copy(text){try{await navigator.clipboard.writeText(text);toast('已复制，回到聊天粘贴即可');}catch{error('剪贴板暂不可用，请使用 Markdown 导出');}}
+async function copy(text) {
+  if (await copyText(text, {clipboard:navigator.clipboard, dialog:$('copy-dialog'), field:$('copy-text')})) {
+    toast('已复制，回到聊天粘贴即可');
+  }
+}
 async function download(operation){await settle();const response=await api(`/api/documents/${current.id}/${operation}`);const blob=await response.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=current.name.replace(/\.pdf$/i,'')+(operation==='markdown'?'.md':'-annotated.pdf');a.click();setTimeout(()=>URL.revokeObjectURL(url),5000);toast(operation==='markdown'?'已导出笔记，可在 Obsidian 中打开':'已导出批注副本，原 PDF 保持不变');}
 async function backupLibrary() {
   await settle();
@@ -718,6 +723,9 @@ $('reader-scroll').addEventListener('scroll',()=>{
 $('highlight-filter').addEventListener('change',renderList);
 $('copy-all').addEventListener('click',async()=>{try{await settle();const text=await(await api(`/api/documents/${current.id}/markdown`)).text();await copy(`${documentContext()}\n\n${text}`);}catch(err){error(err.message);}});
 $('copy-document-link').addEventListener('click',()=>copy(documentLink()));
+$('copy-select-all').addEventListener('click',()=>{$('copy-text').focus();$('copy-text').select();});
+$('copy-close').addEventListener('click',()=>$('copy-dialog').close());
+$('copy-dialog').addEventListener('close',()=>{$('copy-text').value='';});
 $('backup-library').addEventListener('click',()=>backupLibrary().catch(err=>error(err.message)));
 for(const [id,operation] of [['export-markdown','markdown'],['export-pdf','annotated.pdf']])$(id).addEventListener('click',()=>download(operation).catch(err=>error(err.message)));
 function toggleHelp(visible = $('help').hidden) { $('help').hidden=!visible; $('help-toggle').setAttribute('aria-expanded',String(visible)); }
@@ -726,6 +734,10 @@ $('dismiss-error').addEventListener('click',clearError);
 $('retry-save').addEventListener('click',async()=>{const operations=failedWrites.splice(0);clearError();for(let i=0;i<operations.length;i++){try{await enqueueWrite(operations[i]);}catch{failedWrites.push(...operations.slice(i+1));break;}}});
 $('undo').addEventListener('click',async()=>{try{await settle();const action=undoAction;if(!action||action.docId!==current.id)return;undoAction=null;$('undo').disabled=true;if(action.type==='add'){await enqueueWrite(async()=>{await json(`/api/documents/${current.id}/highlights/${action.id}`,'DELETE');const draft=noteDraft(current.id,action.id);if(draft!==undefined)clearNoteDraft(current.id,action.id,draft);current.highlights=current.highlights.filter(h=>h.id!==action.id);paintHighlights();renderList();});}else{const restored=await enqueueWrite(()=>json(`/api/documents/${current.id}/highlights`,'POST',action.item));if(action.item.note||action.item.kind==='vocabulary')Object.assign(restored,await json(`/api/documents/${current.id}/highlights/${restored.id}`,'PATCH',{note:action.item.note,kind:action.item.kind}));current.highlights.push(restored);if(action.draft!==undefined)rememberNoteDraft(current.id,restored.id,action.draft,restored.note||'');paintHighlights();renderList();}toast('已撤销');}catch(err){error(err.message,true);}});
 document.addEventListener('keydown',event=>{
+  if ($('copy-dialog').open) {
+    if (event.key === 'Escape') { event.preventDefault(); $('copy-dialog').close(); }
+    return; // Keep copy, selection, and navigation keys inside the manual-copy dialog.
+  }
   if(event.key==='Escape'){dismissSelectionMenu(true);toggleHelp(false);if(event.target===$('zoom'))updateZoomControls();if(sidebarTab==='search'&&sidebarVisible)showSidebar('search',false).catch(err=>error(err.message));return;}
   const editing=event.target.isContentEditable||/INPUT|TEXTAREA|SELECT/.test(event.target.tagName);
   if (!editing && !event.metaKey && !event.ctrlKey && !event.altKey && event.key === '?') { event.preventDefault(); toggleHelp(); return; }

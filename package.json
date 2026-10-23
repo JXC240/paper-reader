@@ -5,6 +5,7 @@
   "description": "Local PDF reading workspace with persistent highlights and portable reading notes",
   "license": "MIT",
   "scripts": {
+    "test:clipboard": "node --test tests/clipboard.mjs",
     "test:search": "node --test tests/search.mjs",
     "test:browser": "node tests/browser.mjs"
   },
