@@ -88,6 +88,12 @@
     </section>
   </main>
   <div id="selection-menu" class="selection-menu" hidden><button id="highlight-selection" class="primary">标记这段</button><button id="copy-selection">复制选文</button><button id="cancel-selection" class="quiet" aria-label="取消选文" title="取消（Esc）">×</button></div>
+  <dialog id="copy-dialog" class="copy-dialog" aria-labelledby="copy-title" aria-describedby="copy-instructions">
+    <h2 id="copy-title">手动复制内容</h2>
+    <p id="copy-instructions">浏览器暂时无法自动复制。下方内容已选中，请按 <kbd>⌘ C</kbd>（Mac）或 <kbd>Ctrl C</kbd>（其他系统）复制，再回到聊天粘贴。按 Esc 或点击关闭即可继续阅读。</p>
+    <textarea id="copy-text" readonly aria-label="待复制内容" spellcheck="false"></textarea>
+    <div class="copy-dialog-actions"><button id="copy-select-all">重新全选</button><button id="copy-close" class="primary">关闭，继续阅读</button></div>
+  </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
   <script type="module" src="/web/app.js"></script>
 </body>
